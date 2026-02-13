@@ -1,0 +1,646 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' 'unsafe-eval' file: data:; script-src 'self' 'unsafe-inline' 'unsafe-eval' file:; style-src 'self' 'unsafe-inline' file:; font-src 'self' file: data:; img-src 'self' file: data:;">
+    <title>Nexia IDE</title>
+    <link rel="stylesheet" href="styles/main.css">
+</head>
+<body>
+    <!-- Custom Title Bar -->
+    <div id="titlebar">
+        <div id="titlebar-drag">
+            <span id="titlebar-icon">🎮</span>
+            <span id="titlebar-text">Nexia IDE</span>
+            <span id="titlebar-project"></span>
+        </div>
+        <div id="titlebar-buttons">
+            <button id="btn-minimize" class="titlebar-btn">─</button>
+            <button id="btn-maximize" class="titlebar-btn">□</button>
+            <button id="btn-close" class="titlebar-btn btn-close">✕</button>
+        </div>
+    </div>
+
+    <!-- Menu Bar -->
+    <div id="menubar">
+        <div class="menu-item" id="menu-file">
+            <span class="menu-label">File</span>
+            <div class="menu-dropdown" id="dropdown-file">
+                <button class="menu-option" id="menu-new-project"><span>New Project</span><span class="menu-shortcut">Ctrl+N</span></button>
+                <button class="menu-option" id="menu-open-project"><span>Open Project...</span><span class="menu-shortcut">Ctrl+O</span></button>
+                <div class="menu-divider"></div>
+                <button class="menu-option" id="menu-new-file"><span>New File</span><span class="menu-shortcut">Ctrl+Alt+N</span></button>
+                <div class="menu-divider"></div>
+                <button class="menu-option" id="menu-save"><span>Save</span><span class="menu-shortcut">Ctrl+S</span></button>
+                <button class="menu-option" id="menu-save-all"><span>Save All</span><span class="menu-shortcut">Ctrl+Shift+S</span></button>
+                <div class="menu-divider"></div>
+                <button class="menu-option" id="menu-close-tab"><span>Close Tab</span><span class="menu-shortcut">Ctrl+W</span></button>
+                <button class="menu-option" id="menu-close-all"><span>Close All Tabs</span></button>
+                <div class="menu-divider"></div>
+                <button class="menu-option" id="menu-export"><span>Export Project (.zip)</span></button>
+                <button class="menu-option" id="menu-import"><span>Import Project (.zip)</span></button>
+                <button class="menu-option" id="menu-upload-doc"><span>Upload Document to Project...</span></button>
+                <div class="menu-divider"></div>
+                <button class="menu-option" id="menu-git-init"><span>Git: Initialize Repository</span></button>
+                <button class="menu-option" id="menu-git-commit"><span>Git: Commit All</span></button>
+                <button class="menu-option" id="menu-git-push"><span>Git: Push to Remote</span></button>
+                <button class="menu-option" id="menu-git-setup"><span>Git: Set Remote URL...</span></button>
+                <div class="menu-divider"></div>
+                <button class="menu-option" id="menu-exit"><span>Exit</span><span class="menu-shortcut">Alt+F4</span></button>
+            </div>
+        </div>
+        <div class="menu-item" id="menu-edit">
+            <span class="menu-label">Edit</span>
+            <div class="menu-dropdown" id="dropdown-edit">
+                <button class="menu-option" id="menu-undo"><span>Undo</span><span class="menu-shortcut">Ctrl+Z</span></button>
+                <button class="menu-option" id="menu-redo"><span>Redo</span><span class="menu-shortcut">Ctrl+Y</span></button>
+                <div class="menu-divider"></div>
+                <button class="menu-option" id="menu-find"><span>Find</span><span class="menu-shortcut">Ctrl+F</span></button>
+                <button class="menu-option" id="menu-find-files"><span>Find in Files</span><span class="menu-shortcut">Ctrl+Shift+F</span></button>
+                <button class="menu-option" id="menu-replace"><span>Replace</span><span class="menu-shortcut">Ctrl+H</span></button>
+                <div class="menu-divider"></div>
+                <button class="menu-option" id="menu-goto-line"><span>Go to Line...</span><span class="menu-shortcut">Ctrl+G</span></button>
+            </div>
+        </div>
+        <div class="menu-item" id="menu-build-menu">
+            <span class="menu-label">Build</span>
+            <div class="menu-dropdown" id="dropdown-build">
+                <button class="menu-option" id="menu-build"><span>Build</span><span class="menu-shortcut">F7 / Ctrl+B</span></button>
+                <button class="menu-option" id="menu-rebuild"><span>Rebuild</span><span class="menu-shortcut">Ctrl+Shift+B</span></button>
+                <button class="menu-option" id="menu-clean"><span>Clean</span></button>
+                <div class="menu-divider"></div>
+                <button class="menu-option" id="menu-deploy"><span>Deploy to Devkit</span></button>
+            </div>
+        </div>
+        <div class="menu-item" id="menu-view">
+            <span class="menu-label">View</span>
+            <div class="menu-dropdown" id="dropdown-view">
+                <button class="menu-option" id="menu-toggle-sidebar"><span>Toggle Sidebar</span><span class="menu-shortcut">Ctrl+\</span></button>
+                <button class="menu-option" id="menu-toggle-output"><span>Toggle Output Panel</span><span class="menu-shortcut">Ctrl+`</span></button>
+                <div class="menu-divider"></div>
+                <button class="menu-option" id="menu-extensions"><span>Extensions</span></button>
+                <button class="menu-option" id="menu-sdk-tools"><span>SDK Tools</span></button>
+                <button class="menu-option" id="menu-settings"><span>Settings</span></button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toolbar -->
+    <div id="toolbar">
+        <div id="toolbar-left">
+            <select id="config-select" title="Build Configuration">
+                <option value="Debug">Debug</option>
+                <option value="Release">Release</option>
+                <option value="Profile">Profile</option>
+            </select>
+        </div>
+        <div id="toolbar-right">
+            <button class="toolbar-btn" id="btn-deploy" title="Deploy to Devkit">📡 Deploy</button>
+            <button class="toolbar-btn" id="btn-extensions" title="Extensions">🧩 Extensions</button>
+            <button class="toolbar-btn" id="btn-settings" title="Settings">⚙ Settings</button>
+        </div>
+    </div>
+
+    <!-- Main Layout -->
+    <div id="main">
+        <div id="sidebar">
+            <div id="sidebar-tabs">
+                <button class="sidebar-tab active" data-panel="explorer" title="Explorer">📁</button>
+                <button class="sidebar-tab" data-panel="search" title="Find in Files (Ctrl+Shift+F)">🔍</button>
+                <button class="sidebar-tab" data-panel="extensions" title="Extensions">🧩</button>
+                <button class="sidebar-tab" data-panel="devkit" title="Devkit">📡</button>
+                <button class="sidebar-tab" data-panel="emulator" title="Emulator">🎮</button>
+                <button class="sidebar-tab" data-panel="learn" title="Learn">🎓</button>
+                <button class="sidebar-tab" data-panel="study" title="Study & Quizzes">📝</button>
+                <button class="sidebar-tab" data-panel="community" title="Community">💬</button>
+            </div>
+            <div id="sidebar-content">
+                <div id="panel-explorer" class="sidebar-panel active">
+                    <div class="panel-header">
+                        <span>EXPLORER</span>
+                        <div class="panel-actions">
+                            <button class="panel-action-btn" id="explorer-new-file" title="New File (Ctrl+Alt+N)">+</button>
+                            <button class="panel-action-btn" id="explorer-new-folder" title="New Folder">▢+</button>
+                            <button class="panel-action-btn" id="explorer-refresh" title="Refresh">↻</button>
+                            <button class="panel-action-btn" id="explorer-collapse" title="Collapse All">⊟</button>
+                        </div>
+                    </div>
+                    <div id="file-tree" class="panel-body"></div>
+                </div>
+                <div id="panel-search" class="sidebar-panel">
+                    <div class="panel-header">SEARCH</div>
+                    <div id="search-panel" class="panel-body">
+                        <div style="padding:8px 12px;">
+                            <div class="search-input-row">
+                                <input type="text" id="search-query" placeholder="Search in files..." spellcheck="false" autocomplete="off">
+                            </div>
+                            <div class="search-input-row" style="margin-top:4px;">
+                                <input type="text" id="search-replace" placeholder="Replace" spellcheck="false" autocomplete="off" class="hidden">
+                            </div>
+                            <div class="search-options">
+                                <label class="search-opt" title="Match Case">
+                                    <input type="checkbox" id="search-case"> Aa
+                                </label>
+                                <label class="search-opt" title="Use Regular Expression">
+                                    <input type="checkbox" id="search-regex"> .*
+                                </label>
+                                <label class="search-opt" title="Show Replace">
+                                    <input type="checkbox" id="search-show-replace"> ↔
+                                </label>
+                            </div>
+                            <div class="search-input-row" style="margin-top:4px;">
+                                <input type="text" id="search-include" placeholder="Include: *.cpp, *.h" spellcheck="false" autocomplete="off" style="font-size:11px;">
+                            </div>
+                            <div id="search-summary" class="search-summary"></div>
+                        </div>
+                        <div id="search-results" class="search-results"></div>
+                    </div>
+                </div>
+                <div id="panel-extensions" class="sidebar-panel">
+                    <div class="panel-header">EXTENSIONS</div>
+                    <div id="extensions-panel" class="panel-body"></div>
+                </div>
+                <div id="panel-devkit" class="sidebar-panel">
+                    <div class="panel-header">DEVKIT</div>
+                    <div id="devkit-panel" class="panel-body"></div>
+                </div>
+                <div id="panel-emulator" class="sidebar-panel">
+                    <div class="panel-header">NEXIA 360</div>
+                    <div id="emulator-panel" class="panel-body"></div>
+                </div>
+                <div id="panel-learn" class="sidebar-panel">
+                    <div class="panel-header">LEARN</div>
+                    <div id="learn-panel" class="panel-body"></div>
+                </div>
+                <div id="panel-study" class="sidebar-panel">
+                    <div class="panel-header">STUDY</div>
+                    <div id="study-panel" class="panel-body"></div>
+                </div>
+                <div id="panel-community" class="sidebar-panel">
+                    <div class="panel-header">COMMUNITY</div>
+                    <div id="community-panel" class="panel-body"></div>
+                </div>
+            </div>
+        </div>
+
+        <div id="sidebar-resize"></div>
+
+        <div id="editor-area">
+            <div id="tab-bar"></div>
+            <div id="editor-container"></div>
+            <div id="welcome-screen">
+                <div id="welcome-content">
+                    <div id="welcome-logo">🎮</div>
+                    <h1>Nexia IDE</h1>
+                    <p>Xbox 360 Development Environment</p>
+                    <div id="welcome-actions">
+                        <button class="welcome-btn" id="welcome-new">📁 New Project</button>
+                        <button class="welcome-btn" id="welcome-open">📂 Open Project</button>
+                    </div>
+                    <div id="recent-projects"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Bottom Panel -->
+    <div id="bottom-resize" class=""></div>
+    <div id="bottom-panel" class="">
+        <div id="bottom-tabs">
+            <button class="bottom-tab active" data-panel="output">OUTPUT</button>
+            <button class="bottom-tab" data-panel="problems">PROBLEMS</button>
+            <button class="bottom-tab" data-panel="tips">TIPS</button>
+            <div id="bottom-tabs-right">
+                <button id="btn-clear-output" class="bottom-action" title="Clear Output">🗑</button>
+                <button id="btn-close-bottom" class="bottom-action" title="Close Panel (Ctrl+`)">✕</button>
+            </div>
+        </div>
+        <div id="bottom-content">
+            <div id="output-panel" class="bottom-pane active">
+                <pre id="output-text"></pre>
+            </div>
+            <div id="problems-panel" class="bottom-pane">
+                <div id="problems-list"></div>
+            </div>
+            <div id="tips-panel" class="bottom-pane">
+                <div id="tips-list"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Status Bar -->
+    <div id="statusbar">
+        <div id="status-left">
+            <span id="status-build" class="status-build-ready">● Ready</span>
+            <span id="status-sdk">⏳ Detecting SDK...</span>
+        </div>
+        <div id="status-right">
+            <span id="status-zoom">100%</span>
+            <span id="status-line">Ln 1, Col 1</span>
+            <span id="status-encoding">UTF-8</span>
+            <span id="status-language">C++</span>
+        </div>
+    </div>
+
+    <!-- Overlays -->
+    <div id="setup-overlay" class="overlay hidden">
+        <div id="setup-wizard">
+            <div id="setup-header">
+                <span>🎮</span>
+                <h2>Welcome to Nexia IDE</h2>
+                <p>Let's get your Xbox 360 development environment set up.</p>
+            </div>
+            <div id="setup-body">
+                <div id="setup-sdk-status"></div>
+                <div id="setup-sdk-config">
+                    <label>Xbox 360 SDK Path:</label>
+                    <div class="setup-row">
+                        <input type="text" id="setup-sdk-path" placeholder="C:\Program Files (x86)\Microsoft Xbox 360 SDK">
+                        <button id="setup-browse" class="setup-btn">Browse...</button>
+                    </div>
+                    <button id="setup-detect" class="setup-btn">Auto-Detect</button>
+                </div>
+                <div id="setup-sdk-download" class="setup-download hidden">
+                    <div class="setup-download-icon">⬇️</div>
+                    <div class="setup-download-text">
+                        <strong>Can't find the SDK?</strong>
+                        <p>If you don't have the Xbox 360 SDK installed, you can download it below.</p>
+                    </div>
+                    <button id="setup-download-btn" class="setup-btn-download">Download Xbox 360 SDK</button>
+                    <p class="setup-download-note">Opens in your browser. After installing, click Auto-Detect above.</p>
+                </div>
+                <div id="setup-info">
+                    <h3>What you need:</h3>
+                    <ul>
+                        <li>Microsoft Xbox 360 SDK (XDK) installed</li>
+                        <li>That's it — Nexia handles everything else</li>
+                    </ul>
+                </div>
+            </div>
+            <div id="setup-footer">
+                <button id="setup-skip" class="setup-btn-secondary">Skip for Now</button>
+                <button id="setup-done" class="setup-btn-primary">Get Started →</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="new-project-overlay" class="overlay hidden">
+        <div id="new-project-dialog">
+            <h2>New Xbox 360 Project</h2>
+            <div class="dialog-field">
+                <label>Project Name:</label>
+                <input type="text" id="np-name" placeholder="MyGame">
+            </div>
+            <div class="dialog-field">
+                <label>Location:</label>
+                <div class="setup-row">
+                    <input type="text" id="np-location" placeholder="C:\Projects">
+                    <button id="np-browse" class="setup-btn">Browse...</button>
+                </div>
+            </div>
+            <div class="dialog-field">
+                <label>Template:</label>
+                <div id="np-templates"></div>
+            </div>
+            <div class="dialog-buttons">
+                <button id="np-cancel" class="setup-btn-secondary">Cancel</button>
+                <button id="np-create" class="setup-btn-primary">Create Project</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="tools-overlay" class="overlay hidden">
+        <div id="tools-dialog">
+            <h2>🔧 SDK Tools</h2>
+            <div id="tools-grid"></div>
+            <div class="dialog-buttons">
+                <button id="tools-close" class="setup-btn-secondary">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="ext-import-overlay" class="overlay hidden">
+        <div id="ext-import-dialog" class="dialog-box" style="width:480px;">
+            <h2>🧩 Import Extension</h2>
+            <p style="color:var(--text-dim);margin:8px 0 16px;">Import an extension from a .zip file or folder. Extensions must contain a <code>manifest.json</code>.</p>
+            <div class="dialog-buttons" style="flex-direction:column;gap:8px;">
+                <button id="ext-import-zip" class="setup-btn-primary" style="width:100%;">📦 Import from .zip</button>
+                <button id="ext-import-folder" class="setup-btn" style="width:100%;">📁 Import from Folder</button>
+                <button id="ext-create-new" class="setup-btn-secondary" style="width:100%;">✨ Create New Extension</button>
+                <div class="menu-divider" style="margin:4px 0;"></div>
+                <button id="ext-import-close" class="setup-btn-secondary" style="width:100%;">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="ext-create-overlay" class="overlay hidden">
+        <div id="ext-create-dialog" class="dialog-box" style="width:420px;">
+            <h2>✨ Create Extension</h2>
+            <div class="dialog-field">
+                <label>Extension Name</label>
+                <input type="text" id="ext-create-name" placeholder="My Extension" style="width:100%;padding:8px;background:var(--bg-dark);border:1px solid var(--text-dim);color:var(--text);border-radius:4px;">
+            </div>
+            <div class="dialog-field" style="margin-top:12px;">
+                <label>Type</label>
+                <select id="ext-create-type" style="width:100%;padding:8px;background:var(--bg-dark);border:1px solid var(--text-dim);color:var(--text);border-radius:4px;">
+                    <option value="tool">🔧 Tool</option>
+                    <option value="template">📋 Template</option>
+                    <option value="snippet">✂ Snippet</option>
+                    <option value="theme">🎨 Theme</option>
+                    <option value="library">📚 Library</option>
+                    <option value="plugin">🔌 Plugin</option>
+                </select>
+            </div>
+            <div class="dialog-buttons" style="margin-top:16px;">
+                <button id="ext-create-cancel" class="setup-btn-secondary">Cancel</button>
+                <button id="ext-create-submit" class="setup-btn-primary">Create</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="new-file-overlay" class="overlay hidden">
+        <div id="new-file-dialog" style="width:420px;">
+            <h2>New File</h2>
+            <div class="dialog-field">
+                <label>File Name (with extension):</label>
+                <input type="text" id="nf-name" placeholder="main.cpp">
+            </div>
+            <div class="dialog-buttons">
+                <button id="nf-cancel" class="setup-btn-secondary">Cancel</button>
+                <button id="nf-create" class="setup-btn-primary">Create</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Settings Panel -->
+    <div id="settings-overlay" class="overlay hidden">
+        <div id="settings-dialog">
+            <h2>⚙ Settings</h2>
+
+            <div class="settings-section">
+                <h3>Editor</h3>
+                <div class="settings-row">
+                    <label>Font Size</label>
+                    <input type="number" id="setting-font-size" data-setting="fontSize" min="8" max="40" value="14">
+                </div>
+            </div>
+
+            <div class="settings-section">
+                <h3>Visual Effects</h3>
+                <div class="settings-row">
+                    <label>Fancy Mode</label>
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="setting-fancy-effects" checked>
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+                <p style="font-size:11px; color:var(--text-dim); margin-top:4px; line-height:1.5;">
+                    Glassmorphism, glow effects, animations, floating orbs, and decorative shadows. Turn off for a clean, flat look.
+                </p>
+            </div>
+
+            <div class="settings-section">
+                <h3>Theme Colors</h3>
+                <div class="settings-color-grid">
+                    <div class="settings-row">
+                        <label>Accent Color</label>
+                        <input type="color" data-setting="accentColor" value="#00e676">
+                    </div>
+                    <div class="settings-row">
+                        <label>Background (Dark)</label>
+                        <input type="color" data-setting="bgDark" value="#0d0d1a">
+                    </div>
+                    <div class="settings-row">
+                        <label>Background (Main)</label>
+                        <input type="color" data-setting="bgMain" value="#1a1a2e">
+                    </div>
+                    <div class="settings-row">
+                        <label>Panel Background</label>
+                        <input type="color" data-setting="bgPanel" value="#16213e">
+                    </div>
+                    <div class="settings-row">
+                        <label>Sidebar Background</label>
+                        <input type="color" data-setting="bgSidebar" value="#0f1526">
+                    </div>
+                    <div class="settings-row">
+                        <label>Editor Background</label>
+                        <input type="color" data-setting="editorBg" value="#1a1a2e">
+                    </div>
+                    <div class="settings-row">
+                        <label>Text Color</label>
+                        <input type="color" data-setting="textColor" value="#e0e0e0">
+                    </div>
+                    <div class="settings-row">
+                        <label>Text (Dim)</label>
+                        <input type="color" data-setting="textDim" value="#8888aa">
+                    </div>
+                </div>
+            </div>
+
+            <div class="settings-section">
+                <h3>Presets</h3>
+                <div class="settings-presets">
+                    <button class="preset-btn" data-preset="xbox" title="Xbox Green">🟢 Xbox Green</button>
+                    <button class="preset-btn" data-preset="red" title="Red Ring">🔴 Red Ring</button>
+                    <button class="preset-btn" data-preset="blue" title="Blue Steel">🔵 Blue Steel</button>
+                    <button class="preset-btn" data-preset="purple" title="Purple Haze">🟣 Purple Haze</button>
+                    <button class="preset-btn" data-preset="orange" title="Sunset">🟠 Sunset</button>
+                    <button class="preset-btn" data-preset="mono" title="Monochrome">⚪ Monochrome</button>
+                </div>
+            </div>
+
+            <div class="dialog-buttons" style="margin-top:20px;">
+                <button id="settings-open-setup" class="setup-btn">SDK Setup...</button>
+                <button id="settings-retake-tour" class="setup-btn">Retake UI Tour</button>
+                <button id="settings-reset" class="setup-btn-secondary">Reset Theme</button>
+                <button id="settings-reset-learning" class="setup-btn-secondary" style="color:#ffc107;">Reset Learning Progress</button>
+                <button id="settings-factory-reset" class="setup-btn-secondary" style="color:#f44336;">Factory Reset</button>
+                <button id="settings-close" class="setup-btn-primary">Done</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Onboarding Wizard -->
+    <div id="onboarding-overlay" class="overlay hidden">
+        <div id="onboarding-dialog">
+            <!-- Step 1: Welcome -->
+            <div class="ob-step active" data-step="1">
+                <div class="ob-logo">🎮</div>
+                <h1 class="ob-title">Welcome to <span class="ob-accent">Nexia IDE</span></h1>
+                <p class="ob-subtitle">The Xbox 360 Development Environment</p>
+                <p class="ob-desc">Build real games and applications for the Xbox 360 console. We will help you get started — no matter your experience level.</p>
+                <button class="ob-btn-primary" id="ob-next-1">Let's Get Started →</button>
+            </div>
+
+            <!-- Step 2: Skill Level -->
+            <div class="ob-step" data-step="2">
+                <h2 class="ob-title">What's your experience level?</h2>
+                <p class="ob-desc">This helps us tailor tips and guidance to you.</p>
+                <div class="ob-skill-cards">
+                    <div class="ob-skill-card" data-level="beginner">
+                        <div class="ob-skill-icon">🌱</div>
+                        <h3>Beginner</h3>
+                        <p>New to game development or C++. Show me everything!</p>
+                    </div>
+                    <div class="ob-skill-card" data-level="intermediate">
+                        <div class="ob-skill-icon">🔧</div>
+                        <h3>Intermediate</h3>
+                        <p>Comfortable with C++ and basic graphics. Just need Xbox 360 specifics.</p>
+                    </div>
+                    <div class="ob-skill-card" data-level="expert">
+                        <div class="ob-skill-icon">⚡</div>
+                        <h3>Expert</h3>
+                        <p>Experienced developer. Minimal tips, maximum power.</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Step 3: Features Tour -->
+            <div class="ob-step" data-step="3">
+                <h2 class="ob-title">Here's what you can do</h2>
+                <div class="ob-features">
+                    <div class="ob-feature"><span class="ob-feature-icon">📝</span><div><strong>Write Code</strong><br>Full C++ editor with syntax highlighting, IntelliSense, and Xbox 360 SDK support.</div></div>
+                    <div class="ob-feature"><span class="ob-feature-icon">🔨</span><div><strong>Build & Compile</strong><br>One-click builds using the Xbox 360 SDK toolchain. MSBuild-compatible output.</div></div>
+                    <div class="ob-feature"><span class="ob-feature-icon">📡</span><div><strong>Deploy to Hardware</strong><br>Send your compiled .XEX directly to a development kit over the network.</div></div>
+                    <div class="ob-feature"><span class="ob-feature-icon">🎓</span><div><strong>Learn as You Go</strong><br>Guided curriculum, real-time tips, and achievements to track your progress.</div></div>
+                </div>
+                <button class="ob-btn-primary" id="ob-next-3">Start Building →</button>
+                <button class="ob-btn-secondary" id="ob-skip">Skip Tour</button>
+            </div>
+
+            <!-- Step indicators -->
+            <div class="ob-steps-indicator">
+                <span class="ob-dot active" data-dot="1"></span>
+                <span class="ob-dot" data-dot="2"></span>
+                <span class="ob-dot" data-dot="3"></span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Achievement Toast -->
+    <div id="achievement-toast" class="achievement-toast hidden">
+        <div class="achievement-icon" id="ach-icon">🏆</div>
+        <div class="achievement-info">
+            <div class="achievement-label">ACHIEVEMENT UNLOCKED</div>
+            <div class="achievement-name" id="ach-name"></div>
+            <div class="achievement-desc" id="ach-desc"></div>
+        </div>
+    </div>
+
+    <!-- Inline Tip Banner -->
+    <div id="inline-tip" class="inline-tip hidden">
+        <span class="inline-tip-icon" id="tip-icon">💡</span>
+        <span class="inline-tip-text" id="tip-text"></span>
+        <button class="inline-tip-dismiss" id="tip-dismiss" title="Dismiss">✕</button>
+        <button class="inline-tip-more" id="tip-more" title="Show in Tips panel">More →</button>
+    </div>
+
+    <!-- Quiz Dialog -->
+    <div id="quiz-overlay" class="overlay hidden">
+        <div id="quiz-dialog" class="dialog-box" style="width:560px;">
+            <div class="dialog-header">
+                <h2 id="quiz-title">📝 Quiz</h2>
+                <span id="quiz-progress">1 / 10</span>
+            </div>
+            <div id="quiz-content">
+                <div id="quiz-question" class="quiz-question"></div>
+                <div id="quiz-mode-mc" class="quiz-mode">
+                    <div id="quiz-options"></div>
+                </div>
+                <div id="quiz-mode-fill" class="quiz-mode" style="display:none;">
+                    <input type="text" id="quiz-fill-input" class="quiz-fill-input" placeholder="Type your answer..." autocomplete="off">
+                    <button id="quiz-fill-submit" class="ob-btn-primary" style="margin-top:10px;">Submit Answer</button>
+                </div>
+                <div id="quiz-feedback" class="quiz-feedback hidden"></div>
+                <div id="quiz-ref" class="quiz-ref hidden">
+                    <strong>📖 Reference:</strong> <span id="quiz-ref-text"></span>
+                </div>
+            </div>
+            <div class="dialog-buttons">
+                <button id="quiz-ref-btn" class="setup-btn-secondary">📖 Show Reference</button>
+                <button id="quiz-note-btn" class="setup-btn-secondary">📌 Save as Flashcard</button>
+                <button id="quiz-next" class="setup-btn-primary">Next →</button>
+                <button id="quiz-close" class="setup-btn-secondary">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Flashcard Viewer -->
+    <div id="flashcard-overlay" class="overlay hidden">
+        <div id="flashcard-dialog" class="dialog-box" style="width:480px;">
+            <div class="dialog-header">
+                <h2>🃏 Flashcards</h2>
+                <span id="fc-progress">1 / 0</span>
+            </div>
+            <div id="flashcard-container">
+                <div id="flashcard" class="flashcard" tabindex="0">
+                    <div class="flashcard-inner">
+                        <div class="flashcard-front">
+                            <div id="fc-front-text">Question</div>
+                        </div>
+                        <div class="flashcard-back">
+                            <div id="fc-back-text">Answer</div>
+                        </div>
+                    </div>
+                </div>
+                <p class="fc-hint">Click card to flip · Arrow keys to navigate</p>
+            </div>
+            <div class="dialog-buttons">
+                <button id="fc-prev" class="setup-btn-secondary">← Prev</button>
+                <button id="fc-flip" class="setup-btn">Flip</button>
+                <button id="fc-next" class="setup-btn-secondary">Next →</button>
+                <button id="fc-close" class="setup-btn-primary">Done</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Study Notes Editor -->
+    <div id="notes-overlay" class="overlay hidden">
+        <div id="notes-dialog" class="dialog-box" style="width:600px;">
+            <div class="dialog-header">
+                <h2>📓 Study Notes</h2>
+            </div>
+            <textarea id="notes-editor" class="notes-editor" placeholder="Write your study notes here...&#10;&#10;These are saved with your project."></textarea>
+            <div class="dialog-buttons">
+                <button id="notes-export" class="setup-btn-secondary">Export as .txt</button>
+                <button id="notes-save" class="setup-btn-primary">Save & Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Code-Along Helper (floating widget) -->
+    <div id="code-helper" class="code-helper hidden">
+        <div class="code-helper-header">
+            <span>🤖 Code Helper</span>
+            <button id="code-helper-close" class="code-helper-x">✕</button>
+        </div>
+        <div id="code-helper-body"></div>
+        <div id="code-helper-actions">
+            <button id="code-helper-insert" class="code-helper-btn">Insert Snippet</button>
+            <button id="code-helper-dismiss" class="code-helper-btn code-helper-btn-dim">Dismiss</button>
+        </div>
+    </div>
+
+    <!-- Guided UI Tour -->
+    <div id="tour-overlay" class="tour-overlay hidden">
+        <div id="tour-spotlight"></div>
+        <div id="tour-card">
+            <div id="tour-step-badge">1 / 9</div>
+            <div id="tour-icon">📁</div>
+            <h3 id="tour-title">Explorer</h3>
+            <p id="tour-body">This is where your project files live.</p>
+            <div id="tour-buttons">
+                <button id="tour-prev" class="tour-btn">← Back</button>
+                <button id="tour-skip" class="tour-btn tour-btn-dim">Skip Tour</button>
+                <button id="tour-next" class="tour-btn tour-btn-primary">Next →</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        window.nodeRequire = require;
+    </script>
+    <script src="app.js"></script>
+</body>
+</html>
