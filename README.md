@@ -1,7 +1,3 @@
-<p align="center">
-  <img src="icon.png" alt="Nexia IDE" width="128" height="128">
-</p>
-
 <h1 align="center">Nexia IDE</h1>
 
 <p align="center">
