@@ -1,0 +1,80 @@
+{
+  "name": "nexia-ide",
+  "displayName": "Nexia IDE",
+  "description": "Xbox 360 Development Environment",
+  "version": "1.0.0",
+  "author": "Nexia",
+  "license": "MIT",
+  "main": "dist/main/main.js",
+  "scripts": {
+    "build": "tsc && node scripts/copy-assets.js",
+    "start": "npm run build && electron .",
+    "dist": "npm run build && electron-builder --win",
+    "dist:installer": "npm run build && electron-builder --win --config.win.target=nsis",
+    "dev": "npm run build && electron ."
+  },
+  "build": {
+    "appId": "com.nexia.ide",
+    "productName": "Nexia IDE",
+    "copyright": "Copyright Â© 2026 Nexia",
+    "forceCodeSigning": false,
+    "artifactName": "NexiaIDE-${version}.${ext}",
+    "win": {
+      "target": [
+        {
+          "target": "dir",
+          "arch": ["x64"]
+        }
+      ],
+      "icon": "resources/icon.ico",
+      "requestedExecutionLevel": "asInvoker",
+      "publisherName": "Nexia",
+      "legalTrademarks": "Nexia IDE",
+      "fileAssociations": [
+        {
+          "ext": "nexproj",
+          "name": "Nexia IDE Project",
+          "description": "Nexia IDE Project File",
+          "icon": "resources/icon.ico"
+        }
+      ]
+    },
+    "portable": {
+      "artifactName": "NexiaIDE.exe",
+      "unpackDirName": "NexiaIDE-data"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Nexia IDE"
+    },
+    "files": [
+      "dist/**/*",
+      "resources/**/*",
+      "node_modules/monaco-editor/min/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "resources",
+        "to": "resources"
+      },
+      {
+        "from": "sdk",
+        "to": "sdk",
+        "filter": ["**/*"]
+      }
+    ],
+    "asarUnpack": []
+  },
+  "dependencies": {
+    "monaco-editor": "^0.45.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "electron": "^28.0.0",
+    "electron-builder": "^24.9.0",
+    "typescript": "^5.3.0"
+  }
+}
