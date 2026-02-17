@@ -597,7 +597,6 @@ export class ProjectManager {
         fs.mkdirSync(projectDir, { recursive: true });
         fs.mkdirSync(path.join(projectDir, 'src'), { recursive: true });
         fs.mkdirSync(path.join(projectDir, 'include'), { recursive: true });
-        fs.mkdirSync(path.join(projectDir, 'assets'), { recursive: true });
         fs.mkdirSync(path.join(projectDir, 'out'), { recursive: true });
 
         // Write template files
@@ -620,6 +619,11 @@ export class ProjectManager {
             defines: template.config.defines || [],
             configuration: 'Debug',
             pchHeader: 'stdafx.h',
+            enableRTTI: false,
+            exceptionHandling: 'EHsc',
+            warningLevel: 3,
+            additionalCompilerFlags: '',
+            additionalLinkerFlags: '',
         };
 
         // Save project file
@@ -646,6 +650,19 @@ export class ProjectManager {
         const raw = fs.readFileSync(configPath, 'utf-8');
         const config: ProjectConfig = JSON.parse(raw);
         config.path = projectDir;
+
+        // Prune stale sourceFiles entries that no longer exist on disk
+        if (config.sourceFiles && config.sourceFiles.length > 0) {
+            const before = config.sourceFiles.length;
+            config.sourceFiles = config.sourceFiles.filter(f => {
+                const abs = path.isAbsolute(f) ? f : path.join(projectDir, f);
+                return fs.existsSync(abs);
+            });
+            if (config.sourceFiles.length < before) {
+                // Auto-save the cleaned config
+                fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf-8');
+            }
+        }
 
         this.currentProject = config;
         return config;

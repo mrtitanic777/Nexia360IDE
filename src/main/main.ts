@@ -272,6 +272,14 @@ function registerIpcHandlers() {
         return result.canceled ? null : result.filePaths[0];
     });
 
+    ipcMain.handle('file:selectFiles', async (_e, filters?: any[]) => {
+        const result = await dialog.showOpenDialog(mainWindow!, {
+            properties: ['openFile', 'multiSelections'],
+            filters: filters || [{ name: 'All Files', extensions: ['*'] }],
+        });
+        return result.canceled ? null : result.filePaths;
+    });
+
     // ── Project Export/Import ──
     ipcMain.handle('project:export', async () => {
         const project = projectManager.getCurrent();

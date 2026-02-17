@@ -70,6 +70,8 @@
                 <button class="menu-option" id="menu-rebuild"><span>Rebuild</span><span class="menu-shortcut">Ctrl+Shift+B</span></button>
                 <button class="menu-option" id="menu-clean"><span>Clean</span></button>
                 <div class="menu-divider"></div>
+                <button class="menu-option" id="menu-project-properties"><span>Project Properties...</span></button>
+                <div class="menu-divider"></div>
                 <button class="menu-option" id="menu-deploy"><span>Deploy to Devkit</span></button>
             </div>
         </div>
@@ -113,6 +115,7 @@
                 <button class="sidebar-tab" data-panel="emulator" title="Emulator">🎮</button>
                 <button class="sidebar-tab" data-panel="learn" title="Learn">🎓</button>
                 <button class="sidebar-tab" data-panel="study" title="Study & Quizzes">📝</button>
+                <button class="sidebar-tab" data-panel="tutorials" title="Tutorials">🎬</button>
                 <button class="sidebar-tab" data-panel="community" title="Community">💬</button>
             </div>
             <div id="sidebar-content">
@@ -136,7 +139,10 @@
                                 <input type="text" id="search-query" placeholder="Search in files..." spellcheck="false" autocomplete="off">
                             </div>
                             <div class="search-input-row" style="margin-top:4px;">
-                                <input type="text" id="search-replace" placeholder="Replace" spellcheck="false" autocomplete="off" class="hidden">
+                                <input type="text" id="search-replace" placeholder="Replace with..." spellcheck="false" autocomplete="off" class="hidden">
+                            </div>
+                            <div id="replace-actions" class="hidden" style="display:none; margin-top:4px; gap:4px; padding:0 0;">
+                                <button id="btn-replace-all" class="search-action-btn" title="Replace All">Replace All</button>
                             </div>
                             <div class="search-options">
                                 <label class="search-opt" title="Match Case">
@@ -176,6 +182,10 @@
                 <div id="panel-study" class="sidebar-panel">
                     <div class="panel-header">STUDY</div>
                     <div id="study-panel" class="panel-body"></div>
+                </div>
+                <div id="panel-tutorials" class="sidebar-panel">
+                    <div class="panel-header">TUTORIALS</div>
+                    <div id="tutorials-panel" class="panel-body"></div>
                 </div>
                 <div id="panel-community" class="sidebar-panel">
                     <div class="panel-header">COMMUNITY</div>
@@ -379,6 +389,20 @@
             <h2>⚙ Settings</h2>
 
             <div class="settings-section">
+                <h3>Explorer</h3>
+                <div class="settings-row">
+                    <label>Show Hidden Files</label>
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="setting-show-hidden-files">
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+                <p style="font-size:11px; color:var(--text-dim); margin-top:4px; line-height:1.5;">
+                    Show project configuration files like nexia.json in the file explorer.
+                </p>
+            </div>
+
+            <div class="settings-section">
                 <h3>Editor</h3>
                 <div class="settings-row">
                     <label>Font Size</label>
@@ -457,6 +481,63 @@
                 <button id="settings-reset-learning" class="setup-btn-secondary" style="color:#ffc107;">Reset Learning Progress</button>
                 <button id="settings-factory-reset" class="setup-btn-secondary" style="color:#f44336;">Factory Reset</button>
                 <button id="settings-close" class="setup-btn-primary">Done</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Project Properties Dialog -->
+    <div id="project-props-overlay" class="overlay hidden">
+        <div id="project-props-dialog" style="max-width:520px;">
+            <h2>⚙ Project Properties</h2>
+
+            <div class="settings-section">
+                <h3>C/C++ Compiler</h3>
+                <div class="settings-row">
+                    <label>Enable RTTI (/GR)</label>
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="pp-enable-rtti">
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+                <p style="font-size:10px; color:var(--text-dim); margin-top:2px; line-height:1.4;">
+                    Enables Run-Time Type Information. Required for dynamic_cast and typeid on polymorphic types.
+                </p>
+                <div class="settings-row" style="margin-top:10px;">
+                    <label>Exception Handling</label>
+                    <select id="pp-exception-handling" style="background:var(--bg-dark); color:var(--text); border:1px solid rgba(255,255,255,0.1); border-radius:4px; padding:4px 8px; font-size:12px;">
+                        <option value="EHsc">/EHsc — C++ only, extern C nothrow</option>
+                        <option value="EHs">/EHs — C++ only</option>
+                        <option value="EHa">/EHa — C++ and structured (SEH)</option>
+                        <option value="off">Disabled</option>
+                    </select>
+                </div>
+                <div class="settings-row" style="margin-top:10px;">
+                    <label>Warning Level</label>
+                    <select id="pp-warning-level" style="background:var(--bg-dark); color:var(--text); border:1px solid rgba(255,255,255,0.1); border-radius:4px; padding:4px 8px; font-size:12px;">
+                        <option value="0">/W0 — Disable all warnings</option>
+                        <option value="1">/W1 — Severe warnings only</option>
+                        <option value="2">/W2 — Significant warnings</option>
+                        <option value="3" selected>/W3 — Production quality (default)</option>
+                        <option value="4">/W4 — Informational warnings</option>
+                    </select>
+                </div>
+                <div class="settings-row" style="margin-top:10px;">
+                    <label>Additional Compiler Flags</label>
+                    <input type="text" id="pp-extra-cl-flags" placeholder="e.g. /Zp8 /favor:XBOX360" style="flex:1; background:var(--bg-dark); color:var(--text); border:1px solid rgba(255,255,255,0.1); border-radius:4px; padding:4px 8px; font-family:var(--mono); font-size:11px;">
+                </div>
+            </div>
+
+            <div class="settings-section">
+                <h3>Linker</h3>
+                <div class="settings-row">
+                    <label>Additional Linker Flags</label>
+                    <input type="text" id="pp-extra-link-flags" placeholder="e.g. /LTCG /STACK:0x40000" style="flex:1; background:var(--bg-dark); color:var(--text); border:1px solid rgba(255,255,255,0.1); border-radius:4px; padding:4px 8px; font-family:var(--mono); font-size:11px;">
+                </div>
+            </div>
+
+            <div class="dialog-buttons" style="margin-top:20px;">
+                <button id="pp-cancel" class="setup-btn-secondary">Cancel</button>
+                <button id="pp-save" class="setup-btn-primary">Save</button>
             </div>
         </div>
     </div>
