@@ -626,10 +626,11 @@ export class ProjectManager {
             additionalLinkerFlags: '',
         };
 
-        // Save project file
+        // Save project file (strip runtime-only path field)
+        const { path: _omit, ...serializable } = config;
         fs.writeFileSync(
             path.join(projectDir, PROJECT_FILE),
-            JSON.stringify(config, null, 2),
+            JSON.stringify(serializable, null, 2),
             'utf-8'
         );
 
@@ -659,8 +660,9 @@ export class ProjectManager {
                 return fs.existsSync(abs);
             });
             if (config.sourceFiles.length < before) {
-                // Auto-save the cleaned config
-                fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf-8');
+                // Auto-save the cleaned config (strip runtime-only path field)
+                const { path: _omit, ...serializable } = config;
+                fs.writeFileSync(configPath, JSON.stringify(serializable, null, 2), 'utf-8');
             }
         }
 
@@ -675,9 +677,11 @@ export class ProjectManager {
         const project = config || this.currentProject;
         if (!project) throw new Error('No project open');
 
+        // Strip the absolute path before serializing — it's set at runtime by open()
+        const { path: _omit, ...serializable } = project;
         fs.writeFileSync(
             path.join(project.path, PROJECT_FILE),
-            JSON.stringify(project, null, 2),
+            JSON.stringify(serializable, null, 2),
             'utf-8'
         );
 
