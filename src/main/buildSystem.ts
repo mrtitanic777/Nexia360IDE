@@ -13,6 +13,7 @@ import { BuildConfig, BuildResult, BuildMessage, ProjectConfig } from '../shared
 export class BuildSystem {
     private toolchain: Toolchain;
     private currentProcess: ChildProcess | null = null;
+    private activeProcesses: Set<ChildProcess> = new Set();
     private onOutput: ((data: string) => void) | null = null;
 
     constructor(toolchain: Toolchain) {
@@ -36,7 +37,7 @@ export class BuildSystem {
         const s = Math.floor(ms / 1000);
         const min = Math.floor(s / 60);
         const sec = s % 60;
-        const frac = (ms % 1000).toString().padStart(2, '0').substring(0, 2);
+        const frac = (ms % 1000).toString().padStart(3, '0').substring(0, 2);
         return `${min.toString().padStart(2, '0')}:${sec.toString().padStart(2, '0')}.${frac}`;
     }
 
@@ -205,7 +206,7 @@ export class BuildSystem {
                 const maxParallel = Math.min(4, filesToCompile.length);
                 const queue = [...filesToCompile];
                 const compileOne = async (): Promise<void> => {
-                    while (queue.length > 0) {
+                    while (queue.length > 0 && errors.length === 0) {
                         const srcPath = queue.shift()!;
                         const baseName = path.basename(srcPath);
                         const objName = path.basename(srcPath, path.extname(srcPath)) + '.obj';
@@ -542,13 +543,14 @@ export class BuildSystem {
         if (this.currentProcess) {
             this.currentProcess.kill();
             this.currentProcess = null;
-            this.emit('\n========== Build: cancelled ==========\n');
         }
+        for (const proc of this.activeProcesses) {
+            try { proc.kill(); } catch {}
+        }
+        this.activeProcesses.clear();
+        this.emit('\n========== Build: cancelled ==========\n');
     }
 
-    /**
-     * Scan project directory for source files.
-     */
     /**
      * Check if an object file is up-to-date relative to its source.
      * Returns true if .obj exists and is newer than the source file (and PCH if applicable).
@@ -623,6 +625,7 @@ export class BuildSystem {
             }
 
             this.currentProcess = proc;
+            this.activeProcesses.add(proc);
             let output = '';
             const errors: BuildMessage[] = [];
             const warnings: BuildMessage[] = [];
@@ -692,6 +695,7 @@ export class BuildSystem {
 
             proc.on('close', (code) => {
                 this.currentProcess = null;
+                this.activeProcesses.delete(proc);
                 // If process exited with error code but we didn't parse any errors,
                 // add a generic error
                 if (code && code !== 0 && errors.length === 0) {
@@ -713,6 +717,7 @@ export class BuildSystem {
 
             proc.on('error', (err) => {
                 this.currentProcess = null;
+                this.activeProcesses.delete(proc);
                 errors.push({
                     file: contextFile, line: 0, column: 0,
                     message: `Cannot execute ${path.basename(toolPath)}: ${err.message}`,

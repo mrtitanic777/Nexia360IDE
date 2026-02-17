@@ -100,6 +100,7 @@ input, textarea, select {
     background: rgba(6, 6, 15, 0.85); backdrop-filter: blur(12px);
     border-bottom: 1px solid rgba(255,255,255,0.03);
     padding: 0 4px; -webkit-app-region: no-drag;
+    position: relative; z-index: 100;
 }
 .menu-item { position: relative; }
 .menu-label {
@@ -111,7 +112,7 @@ input, textarea, select {
 }
 .menu-dropdown {
     display: none; position: absolute; top: 100%; left: 0; min-width: 240px;
-    background: rgba(10, 12, 25, 0.92); backdrop-filter: blur(16px) saturate(150%);
+    background: rgb(10, 12, 25); backdrop-filter: blur(16px) saturate(150%);
     border: 1px solid rgba(255,255,255,0.07); border-radius: 8px;
     padding: 4px 0; z-index: 2000;
     box-shadow: 0 12px 40px rgba(0,0,0,0.5), 0 0 1px rgba(255,255,255,0.1);
@@ -361,7 +362,7 @@ input, textarea, select {
 #bottom-resize.hidden, #bottom-panel.hidden { display: none; }
 #bottom-panel {
     height: var(--bottom-h); display: flex; flex-direction: column;
-    background: var(--bg-panel); border-top: 1px solid rgba(255,255,255,0.04);
+    background: var(--bg-panel);
 }
 #bottom-tabs {
     display: flex; align-items: center; height: 28px;
@@ -755,6 +756,23 @@ input, textarea, select {
 .devkit-file-run:hover { background: rgba(0,230,118,0.15); }
 .devkit-file-entry.launching { opacity: 0.6; }
 
+/* Drag & Drop overlay */
+#devkit-file-browser { position: relative; }
+.devkit-drop-overlay {
+    position: absolute; top: 0; left: 0; right: 0; bottom: 0; z-index: 100;
+    background: rgba(0, 230, 118, 0.08);
+    border: 2px dashed var(--green);
+    border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    pointer-events: none;
+}
+.devkit-drop-overlay.hidden { display: none; }
+.devkit-drop-content {
+    display: flex; flex-direction: column; align-items: center; gap: 6px;
+    color: var(--green); font-size: 13px; font-weight: 600;
+    text-shadow: 0 0 8px rgba(0,230,118,0.3);
+}
+
 /* ═══ Emulator Panel ═══ */
 .emu-section { padding: 12px; border-bottom: 1px solid var(--border); }
 .emu-section h4 { font-size: 11px; color: var(--text-dim); margin-bottom: 8px; letter-spacing: 0.5px; }
@@ -883,7 +901,7 @@ input, textarea, select {
 #context-menu {
     display: none; position: fixed; z-index: 10000;
     min-width: 180px; padding: 4px 0;
-    background: rgba(10, 12, 25, 0.92); backdrop-filter: blur(16px) saturate(140%);
+    background: rgb(10, 12, 25); backdrop-filter: blur(16px) saturate(140%);
     border: 1px solid rgba(255,255,255,0.07);
     border-radius: 8px; box-shadow: 0 12px 40px rgba(0,0,0,0.5);
     font-size: 12px;

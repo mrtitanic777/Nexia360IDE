@@ -297,7 +297,7 @@ function registerIpcHandlers() {
             const dest = result.filePath.replace(/\\/g, '/');
             // Exclude build output
             if (process.platform === 'win32') {
-                execSync(`powershell -Command "Compress-Archive -Path '${src}\\*' -DestinationPath '${dest}' -Force"`, { stdio: 'pipe' });
+                execSync(`powershell -Command "Get-ChildItem -Path '${src}' -Exclude 'out' | Compress-Archive -DestinationPath '${dest}' -Force"`, { stdio: 'pipe' });
             } else {
                 execSync(`cd "${src}" && zip -r "${dest}" . -x "out/*" "*.obj" "*.pch"`, { stdio: 'pipe' });
             }
@@ -467,6 +467,10 @@ function registerIpcHandlers() {
 
     ipcMain.handle(IPC.DEVKIT_FILE_MANAGER, async (_e, remotePath: string, ip?: string) => {
         return devkitManager.listFiles(remotePath, ip);
+    });
+
+    ipcMain.handle(IPC.DEVKIT_COPY_TO, async (_e, localPath: string, remotePath: string, ip?: string) => {
+        return devkitManager.copyTo(localPath, remotePath, ip);
     });
 
     // ── Emulator ──

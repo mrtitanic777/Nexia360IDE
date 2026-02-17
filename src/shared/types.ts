@@ -163,6 +163,7 @@ export const IPC = {
     DEVKIT_REBOOT: 'devkit:reboot',
     DEVKIT_SCREENSHOT: 'devkit:screenshot',
     DEVKIT_FILE_MANAGER: 'devkit:fileManager',
+    DEVKIT_COPY_TO: 'devkit:copyTo',
     DEVKIT_STATUS: 'devkit:status',
 
     // Emulator

@@ -205,6 +205,7 @@ export class DevkitManager {
         return new Promise((resolve, reject) => {
             const socket = new net.Socket();
             let responseData = '';
+            let sentCommand = false;
             const info: Record<string, string> = {};
 
             socket.setTimeout(XBDM_TIMEOUT);
@@ -212,7 +213,8 @@ export class DevkitManager {
             socket.on('data', (data) => {
                 responseData += data.toString();
 
-                if (responseData.includes('201')) {
+                if (!sentCommand && responseData.includes('201')) {
+                    sentCommand = true;
                     // Connected, request system info
                     socket.write('systeminfo\r\n');
 

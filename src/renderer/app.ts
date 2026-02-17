@@ -31,6 +31,7 @@ const IPC = {
     DEVKIT_VOLUMES: 'devkit:volumes',
     DEVKIT_DEPLOY: 'devkit:deploy', DEVKIT_LAUNCH: 'devkit:launch', DEVKIT_REBOOT: 'devkit:reboot',
     DEVKIT_SCREENSHOT: 'devkit:screenshot', DEVKIT_FILE_MANAGER: 'devkit:fileManager',
+    DEVKIT_COPY_TO: 'devkit:copyTo',
     EMU_LAUNCH: 'emu:launch', EMU_STOP: 'emu:stop', EMU_PAUSE: 'emu:pause',
     EMU_RESUME: 'emu:resume', EMU_STEP: 'emu:step', EMU_STEP_OVER: 'emu:stepOver',
     EMU_STATE: 'emu:state',
@@ -2142,6 +2143,7 @@ $('btn-extensions').addEventListener('click', () => {
 // ══════════════════════════════════════
 let devkitConnected = false;
 let devkitCurrentIp = '';
+let devkitCurrentBrowsePath = '';
 
 function initDevkitPanel() {
     $('devkit-panel').innerHTML = `
@@ -2171,6 +2173,12 @@ function initDevkitPanel() {
                 <button class="devkit-btn" id="devkit-path-go">Go</button>
             </div>
             <div id="devkit-file-list" class="devkit-file-list"></div>
+            <div id="devkit-drop-overlay" class="devkit-drop-overlay hidden">
+                <div class="devkit-drop-content">
+                    <span style="font-size:32px;">📦</span>
+                    <span>Drop files here to upload</span>
+                </div>
+            </div>
         </div>`;
 
     // Check if already connected
@@ -2299,6 +2307,90 @@ function initDevkitPanel() {
             if (p) browseDevkitPath(p);
         }
     });
+
+    // ── Drag & Drop file upload to devkit ──
+    const fileBrowser = $('devkit-file-browser');
+    const dropOverlay = $('devkit-drop-overlay');
+    let dragCounter = 0;
+
+    if (fileBrowser && dropOverlay) {
+        fileBrowser.addEventListener('dragenter', (e: DragEvent) => {
+            e.preventDefault();
+            e.stopPropagation();
+            if (!devkitConnected || !devkitCurrentBrowsePath) return;
+            dragCounter++;
+            dropOverlay.classList.remove('hidden');
+        });
+
+        fileBrowser.addEventListener('dragover', (e: DragEvent) => {
+            e.preventDefault();
+            e.stopPropagation();
+            if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+        });
+
+        fileBrowser.addEventListener('dragleave', (e: DragEvent) => {
+            e.preventDefault();
+            e.stopPropagation();
+            dragCounter--;
+            if (dragCounter <= 0) {
+                dragCounter = 0;
+                dropOverlay.classList.add('hidden');
+            }
+        });
+
+        fileBrowser.addEventListener('drop', async (e: DragEvent) => {
+            e.preventDefault();
+            e.stopPropagation();
+            dragCounter = 0;
+            dropOverlay.classList.add('hidden');
+
+            if (!devkitConnected || !devkitCurrentBrowsePath) {
+                appendOutput('Cannot upload: not connected or no directory selected.\n');
+                return;
+            }
+
+            const files = e.dataTransfer?.files;
+            if (!files || files.length === 0) return;
+
+            const remoteDest = devkitCurrentBrowsePath;
+            const sep = remoteDest.endsWith('\\') || remoteDest.endsWith(':') ? '' : '\\';
+            const total = files.length;
+
+            appendOutput(`Uploading ${total} file${total > 1 ? 's' : ''} to ${remoteDest}...\n`);
+            showBottomPanel();
+
+            let succeeded = 0;
+            let failed = 0;
+
+            for (let i = 0; i < files.length; i++) {
+                const file = files[i];
+                const localPath = (file as any).path; // Electron adds .path to File objects
+                if (!localPath) {
+                    appendOutput(`  Skipped "${file.name}" (no local path)\n`);
+                    failed++;
+                    continue;
+                }
+                const remoteFilePath = remoteDest + sep + file.name;
+                appendOutput(`  [${i + 1}/${total}] ${file.name} -> ${remoteFilePath}\n`);
+
+                try {
+                    await ipcRenderer.invoke(IPC.DEVKIT_COPY_TO, localPath, remoteFilePath, devkitCurrentIp);
+                    appendOutput(`    ✓ Uploaded\n`);
+                    succeeded++;
+                } catch (err: any) {
+                    appendOutput(`    ✗ Failed: ${err.message}\n`);
+                    failed++;
+                }
+            }
+
+            appendOutput(`Upload complete: ${succeeded} succeeded, ${failed} failed.\n`);
+
+            // Refresh the current directory listing
+            if (devkitCurrentBrowsePath) {
+                browseDevkitPath(devkitCurrentBrowsePath);
+            }
+        });
+    }
 }
 
 function updateDevkitUI(connected: boolean, ip?: string, consoleName?: string) {
@@ -2347,6 +2439,7 @@ async function showDevkitVolumes() {
     if (!listEl) return;
 
     pathInput.value = '';
+    devkitCurrentBrowsePath = '';
     listEl.innerHTML = '<div class="community-feed-loading">Querying volumes...</div>';
 
     let volumes: string[];
@@ -2380,6 +2473,7 @@ async function browseDevkitPath(remotePath: string) {
     const pathInput = $('devkit-path') as HTMLInputElement;
     if (!listEl) return;
 
+    devkitCurrentBrowsePath = remotePath;
     pathInput.value = remotePath;
     listEl.innerHTML = '<div class="community-feed-loading">Loading...</div>';
 
@@ -3906,112 +4000,265 @@ interface TutorialVideo {
     title: string;
     description: string;
     duration?: string;
+    userAdded?: boolean;
 }
 
-const TUTORIAL_VIDEOS: TutorialVideo[] = [
-    {
-        id: 'dQw4w9WgXcQ',
-        title: 'Getting Started with Nexia IDE',
-        description: 'Install, configure the Xbox 360 SDK, and create your first project.',
-        duration: '12:34',
-    },
-    {
-        id: 'dQw4w9WgXcQ',
-        title: 'Build Pipeline Walkthrough',
-        description: 'Compile, link, and package your Xbox 360 homebrew into a deployable XEX.',
-        duration: '18:02',
-    },
-    {
-        id: 'dQw4w9WgXcQ',
-        title: 'Dev Kit Deployment & Debugging',
-        description: 'Connect to your dev kit, deploy builds, take screenshots, and debug live.',
-        duration: '15:20',
-    },
-    {
-        id: 'dQw4w9WgXcQ',
-        title: 'D3D9 Graphics on Xbox 360',
-        description: 'Set up Direct3D, create shaders, and render your first 3D scene.',
-        duration: '22:45',
-    },
-    {
-        id: 'dQw4w9WgXcQ',
-        title: 'XUI User Interfaces',
-        description: 'Build Xbox-native UIs with XUI scenes, buttons, and navigation.',
-        duration: '14:10',
-    },
-    {
-        id: 'dQw4w9WgXcQ',
-        title: 'Using the Extensions System',
-        description: 'Install, create, and manage IDE extensions to customize your workflow.',
-        duration: '10:55',
-    },
-];
+const DEFAULT_TUTORIAL_VIDEOS: TutorialVideo[] = [];
+
+let tutorialVideos: TutorialVideo[] = [...DEFAULT_TUTORIAL_VIDEOS];
+let currentPlayingVideoId: string | null = null;
+
+function getTutorialStoragePath(): string | null {
+    const settingsDir = process.env.APPDATA || process.env.HOME || '';
+    if (!settingsDir) return null;
+    return nodePath.join(settingsDir, 'Nexia IDE', 'tutorials.json');
+}
+
+function loadTutorialVideos() {
+    const storagePath = getTutorialStoragePath();
+    if (!storagePath) return;
+    try {
+        if (nodeFs.existsSync(storagePath)) {
+            const saved = JSON.parse(nodeFs.readFileSync(storagePath, 'utf-8'));
+            if (Array.isArray(saved)) tutorialVideos = saved;
+        }
+    } catch {}
+}
+
+function saveTutorialVideos() {
+    const storagePath = getTutorialStoragePath();
+    if (!storagePath) return;
+    try {
+        const dir = nodePath.dirname(storagePath);
+        if (!nodeFs.existsSync(dir)) nodeFs.mkdirSync(dir, { recursive: true });
+        nodeFs.writeFileSync(storagePath, JSON.stringify(tutorialVideos, null, 2), 'utf-8');
+    } catch {}
+}
+
+function parseYouTubeId(input: string): string | null {
+    input = input.trim();
+    // Direct ID (11 chars)
+    if (/^[a-zA-Z0-9_-]{11}$/.test(input)) return input;
+    // Full URL patterns
+    const patterns = [
+        /(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/|youtube\.com\/v\/|youtube\.com\/shorts\/)([a-zA-Z0-9_-]{11})/,
+    ];
+    for (const re of patterns) {
+        const m = input.match(re);
+        if (m) return m[1];
+    }
+    return null;
+}
 
 function renderTutorialsPanel() {
     const panel = $('tutorials-panel');
     if (!panel) return;
 
+    loadTutorialVideos();
+
     let html = `
         <div style="padding:8px 12px;">
-            <p style="font-size:11px; color:var(--text-dim); margin:0 0 12px 0; line-height:1.5;">
-                Video tutorials to help you get started with Xbox 360 homebrew development in Nexia IDE.
-            </p>
+            <div style="display:flex; gap:6px; margin-bottom:12px;">
+                <input type="text" id="tutorial-url-input" placeholder="Paste YouTube URL or video ID..."
+                    style="flex:1; background:var(--bg-dark); color:var(--text); border:1px solid rgba(255,255,255,0.1);
+                    border-radius:4px; padding:5px 8px; font-size:11px; font-family:var(--mono);">
+                <button id="tutorial-add-btn" class="setup-btn-primary" style="font-size:11px; padding:4px 12px; white-space:nowrap;">
+                    + Add Video
+                </button>
+            </div>
     `;
 
-    for (const video of TUTORIAL_VIDEOS) {
-        const thumbUrl = `https://img.youtube.com/vi/${video.id}/mqdefault.jpg`;
-        html += `
-            <div class="tutorial-card" data-video-id="${video.id}" style="
-                margin-bottom:10px; border-radius:6px; overflow:hidden;
-                background:var(--bg-panel); border:1px solid rgba(255,255,255,0.06);
-                cursor:pointer; transition:border-color 0.2s;
-            ">
-                <div style="position:relative; width:100%; padding-top:56.25%; background:#000;">
-                    <img src="${thumbUrl}" style="position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover;"
-                         onerror="this.style.display='none'">
-                    <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
-                        width:40px;height:40px;border-radius:50%;background:rgba(255,0,0,0.85);
-                        display:flex;align-items:center;justify-content:center;">
-                        <div style="width:0;height:0;border-left:14px solid #fff;border-top:8px solid transparent;border-bottom:8px solid transparent;margin-left:3px;"></div>
-                    </div>
-                    ${video.duration ? `<span style="position:absolute;bottom:4px;right:4px;background:rgba(0,0,0,0.8);color:#fff;font-size:10px;padding:1px 5px;border-radius:3px;">${video.duration}</span>` : ''}
-                </div>
-                <div style="padding:8px 10px;">
-                    <div style="font-size:12px;font-weight:600;color:var(--text);line-height:1.3;margin-bottom:3px;">${video.title}</div>
-                    <div style="font-size:10px;color:var(--text-dim);line-height:1.4;">${video.description}</div>
-                </div>
-            </div>
-        `;
-    }
-
+    // Video player area (hidden until a video is selected)
     html += `
-            <div style="margin-top:16px; text-align:center;">
-                <button class="setup-btn" id="tutorials-open-channel" style="font-size:11px;">
-                    View All on YouTube
-                </button>
+        <div id="tutorial-player" style="display:none; margin-bottom:12px; border-radius:6px; overflow:hidden;
+            border:1px solid rgba(255,255,255,0.06); background:#000;">
+            <div style="position:relative; width:100%; padding-top:56.25%;">
+                <iframe id="tutorial-iframe" style="position:absolute;top:0;left:0;width:100%;height:100%;border:none;"
+                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                    allowfullscreen></iframe>
+            </div>
+            <div id="tutorial-player-title" style="padding:6px 10px; font-size:11px; color:var(--text-dim); display:flex; justify-content:space-between; align-items:center;">
+                <span id="tutorial-player-name"></span>
+                <button id="tutorial-player-close" style="background:none; border:none; color:var(--text-dim); cursor:pointer; font-size:14px; padding:2px 6px;" title="Close player">✕</button>
             </div>
         </div>
     `;
 
+    if (tutorialVideos.length === 0) {
+        html += `
+            <div style="text-align:center; padding:20px 10px; color:var(--text-dim);">
+                <p style="font-size:12px; margin:0 0 6px 0;">No videos added yet.</p>
+                <p style="font-size:10px; margin:0; line-height:1.5;">Paste a YouTube URL above to add tutorials,<br>walkthroughs, or any reference videos.</p>
+            </div>
+        `;
+    } else {
+        for (let i = 0; i < tutorialVideos.length; i++) {
+            const video = tutorialVideos[i];
+            const thumbUrl = `https://img.youtube.com/vi/${video.id}/mqdefault.jpg`;
+            const isPlaying = currentPlayingVideoId === video.id;
+            html += `
+                <div class="tutorial-card${isPlaying ? ' playing' : ''}" data-video-index="${i}" data-video-id="${video.id}" style="
+                    margin-bottom:8px; border-radius:6px; overflow:hidden;
+                    background:var(--bg-panel); border:1px solid ${isPlaying ? 'var(--green)' : 'rgba(255,255,255,0.06)'};
+                    cursor:pointer; transition:border-color 0.2s; position:relative;
+                ">
+                    <div style="display:flex; align-items:center; gap:8px; padding:6px 8px;">
+                        <div style="position:relative; width:80px; min-width:80px; height:45px; border-radius:4px; overflow:hidden; background:#000;">
+                            <img src="${thumbUrl}" style="width:100%;height:100%;object-fit:cover;"
+                                 onerror="this.style.display='none'">
+                            <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
+                                width:22px;height:22px;border-radius:50%;background:rgba(255,0,0,0.85);
+                                display:flex;align-items:center;justify-content:center;">
+                                <div style="width:0;height:0;border-left:8px solid #fff;border-top:5px solid transparent;border-bottom:5px solid transparent;margin-left:2px;"></div>
+                            </div>
+                            ${video.duration ? `<span style="position:absolute;bottom:2px;right:2px;background:rgba(0,0,0,0.8);color:#fff;font-size:8px;padding:0px 3px;border-radius:2px;">${video.duration}</span>` : ''}
+                        </div>
+                        <div style="flex:1; min-width:0;">
+                            <div style="font-size:11px;font-weight:600;color:var(--text);line-height:1.3;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(video.title)}</div>
+                            <div style="font-size:9px;color:var(--text-dim);line-height:1.4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(video.description)}</div>
+                        </div>
+                        <button class="tutorial-remove-btn" data-remove-index="${i}" title="Remove"
+                            style="background:none;border:none;color:var(--text-dim);cursor:pointer;font-size:12px;padding:4px;opacity:0.5;flex-shrink:0;"
+                            >✕</button>
+                    </div>
+                </div>
+            `;
+        }
+    }
+
+    html += `</div>`;
     panel.innerHTML = html;
 
-    // Click to open videos in external browser
+    // ── Event handlers ──
+
+    // Add video
+    const addBtn = $('tutorial-add-btn');
+    const urlInput = $('tutorial-url-input') as HTMLInputElement;
+
+    addBtn?.addEventListener('click', () => addTutorialFromInput());
+    urlInput?.addEventListener('keydown', (e: KeyboardEvent) => {
+        if (e.key === 'Enter') addTutorialFromInput();
+    });
+
+    // Play video on card click
     panel.querySelectorAll('.tutorial-card').forEach((card: Element) => {
-        card.addEventListener('click', () => {
+        card.addEventListener('click', (e: Event) => {
+            // Don't play if clicking remove button
+            if ((e.target as HTMLElement).closest('.tutorial-remove-btn')) return;
             const videoId = (card as HTMLElement).dataset.videoId;
-            if (videoId) shell.openExternal(`https://www.youtube.com/watch?v=${videoId}`);
+            if (videoId) playTutorialVideo(videoId);
         });
         (card as HTMLElement).addEventListener('mouseenter', () => {
-            (card as HTMLElement).style.borderColor = 'var(--green)';
+            if (!(card as HTMLElement).classList.contains('playing')) {
+                (card as HTMLElement).style.borderColor = 'var(--green)';
+            }
         });
         (card as HTMLElement).addEventListener('mouseleave', () => {
-            (card as HTMLElement).style.borderColor = 'rgba(255,255,255,0.06)';
+            if (!(card as HTMLElement).classList.contains('playing')) {
+                (card as HTMLElement).style.borderColor = 'rgba(255,255,255,0.06)';
+            }
         });
     });
 
-    document.getElementById('tutorials-open-channel')?.addEventListener('click', () => {
-        shell.openExternal('https://www.youtube.com/@NexiaIDE');
+    // Remove video buttons
+    panel.querySelectorAll('.tutorial-remove-btn').forEach((btn: Element) => {
+        btn.addEventListener('click', (e: Event) => {
+            e.stopPropagation();
+            const idx = parseInt((btn as HTMLElement).dataset.removeIndex || '-1', 10);
+            if (idx >= 0 && idx < tutorialVideos.length) {
+                const removed = tutorialVideos[idx];
+                if (removed.id === currentPlayingVideoId) {
+                    currentPlayingVideoId = null;
+                }
+                tutorialVideos.splice(idx, 1);
+                saveTutorialVideos();
+                renderTutorialsPanel();
+            }
+        });
     });
+
+    // Close player
+    $('tutorial-player-close')?.addEventListener('click', () => {
+        currentPlayingVideoId = null;
+        const player = $('tutorial-player');
+        const iframe = $('tutorial-iframe') as HTMLIFrameElement;
+        if (player) player.style.display = 'none';
+        if (iframe) iframe.src = '';
+        // Remove playing state from cards
+        panel.querySelectorAll('.tutorial-card.playing').forEach(c => {
+            (c as HTMLElement).classList.remove('playing');
+            (c as HTMLElement).style.borderColor = 'rgba(255,255,255,0.06)';
+        });
+    });
+
+    // Restore player if a video was playing
+    if (currentPlayingVideoId) {
+        playTutorialVideo(currentPlayingVideoId, false);
+    }
+}
+
+function addTutorialFromInput() {
+    const urlInput = $('tutorial-url-input') as HTMLInputElement;
+    if (!urlInput) return;
+    const raw = urlInput.value.trim();
+    if (!raw) return;
+
+    const videoId = parseYouTubeId(raw);
+    if (!videoId) {
+        appendOutput('Invalid YouTube URL or video ID.\n');
+        return;
+    }
+
+    // Check for duplicates
+    if (tutorialVideos.some(v => v.id === videoId)) {
+        appendOutput('Video already in list.\n');
+        urlInput.value = '';
+        return;
+    }
+
+    // Add with a default title — user can see the thumbnail to identify it
+    tutorialVideos.push({
+        id: videoId,
+        title: `YouTube Video (${videoId})`,
+        description: raw.length > 50 ? raw.substring(0, 50) + '...' : raw,
+        userAdded: true,
+    });
+    saveTutorialVideos();
+    urlInput.value = '';
+    renderTutorialsPanel();
+
+    // Auto-play the newly added video
+    playTutorialVideo(videoId);
+}
+
+function playTutorialVideo(videoId: string, autoplay = true) {
+    currentPlayingVideoId = videoId;
+    const player = $('tutorial-player');
+    const iframe = $('tutorial-iframe') as HTMLIFrameElement;
+    const nameEl = $('tutorial-player-name');
+
+    if (!player || !iframe) return;
+
+    iframe.src = `https://www.youtube-nocookie.com/embed/${videoId}${autoplay ? '?autoplay=1' : ''}`;
+    player.style.display = 'block';
+
+    const video = tutorialVideos.find(v => v.id === videoId);
+    if (nameEl) nameEl.textContent = video?.title || videoId;
+
+    // Update card highlight
+    const panel = $('tutorials-panel');
+    if (panel) {
+        panel.querySelectorAll('.tutorial-card').forEach(c => {
+            const id = (c as HTMLElement).dataset.videoId;
+            if (id === videoId) {
+                (c as HTMLElement).classList.add('playing');
+                (c as HTMLElement).style.borderColor = 'var(--green)';
+            } else {
+                (c as HTMLElement).classList.remove('playing');
+                (c as HTMLElement).style.borderColor = 'rgba(255,255,255,0.06)';
+            }
+        });
+    }
 }
 
 function renderCommunityPanel() {
