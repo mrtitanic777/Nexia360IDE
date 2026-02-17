@@ -2,7 +2,7 @@
   "name": "nexia-ide",
   "displayName": "Nexia IDE",
   "description": "Xbox 360 Development Environment",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "Nexia",
   "license": "MIT",
   "main": "dist/main/main.js",
@@ -16,7 +16,7 @@
   "build": {
     "appId": "com.nexia.ide",
     "productName": "Nexia IDE",
-    "copyright": "Copyright Â© 2026 Nexia",
+    "copyright": "Copyright © 2026 Nexia",
     "forceCodeSigning": false,
     "artifactName": "NexiaIDE-${version}.${ext}",
     "win": {

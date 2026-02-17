@@ -93,15 +93,40 @@ export class BuildSystem {
 
         // ── ClCompile ──
         // Discover all source files: merge config list with directory scan
+        // Use case-insensitive dedup since Windows paths are case-insensitive
         const configuredFiles = (project.sourceFiles || []).filter(f => /\.(cpp|c|cc|cxx)$/i.test(f));
         const discoveredFiles = this.discoverSourceFiles(project.path);
-        const allSources = new Set<string>();
-        for (const f of configuredFiles) {
+        const seen = new Set<string>();
+        const sourceFiles: string[] = [];
+        const addSource = (f: string) => {
             const abs = path.isAbsolute(f) ? f : path.join(project.path, f);
-            allSources.add(abs);
+            const key = abs.toLowerCase();
+            if (!seen.has(key) && fs.existsSync(abs)) {
+                seen.add(key);
+                sourceFiles.push(abs);
+            }
+        };
+        for (const f of configuredFiles) addSource(f);
+        for (const f of discoveredFiles) addSource(f);
+
+        // Detect object file name collisions (e.g. src/util.cpp and lib/util.cpp)
+        const objNameMap = new Map<string, string>();
+        for (const srcFile of sourceFiles) {
+            const objName = path.basename(srcFile, path.extname(srcFile)).toLowerCase() + '.obj';
+            const existing = objNameMap.get(objName);
+            if (existing) {
+                const relA = path.relative(project.path, existing);
+                const relB = path.relative(project.path, srcFile);
+                warnings.push({
+                    file: srcFile, line: 0, column: 0,
+                    message: `Object file collision: "${relB}" and "${relA}" both produce ${objName}. The second will overwrite the first.`,
+                    severity: 'warning',
+                });
+                this.emit(`1>  warning: "${relB}" collides with "${relA}" (both produce ${objName})\n`);
+            }
+            objNameMap.set(objName, srcFile);
         }
-        for (const f of discoveredFiles) allSources.add(f);
-        const sourceFiles = Array.from(allSources);
+
         const objFiles: string[] = [];
 
         // Determine PCH files
@@ -111,11 +136,14 @@ export class BuildSystem {
         const pchCpp = sourceFiles.find(f => path.basename(f).toLowerCase() === pchCppName.toLowerCase());
         const nonPchFiles = sourceFiles.filter(f => path.basename(f).toLowerCase() !== pchCppName.toLowerCase());
         const usePch = !!pchCpp;
+        let pchRebuilt = false;
+        let skippedCount = 0;
 
         if (sourceFiles.length > 0) {
             this.emit(`1>ClCompile:\n`);
 
             // Step 1: Compile PCH source first with /Yc (create precompiled header)
+            // PCH always recompiles since header changes are hard to track
             if (usePch && pchCpp) {
                 // Clean stale PCH and compiler PDB to prevent C2859
                 try { fs.unlinkSync(pchPath); } catch {}
@@ -131,6 +159,7 @@ export class BuildSystem {
                     pchMode: 'create', pchHeader: pchHeaderName, pchFile: pchPath
                 });
                 fullOutput += result.output;
+                pchRebuilt = true;
 
                 if (result.rawLines.length > 0) {
                     for (const line of result.rawLines) this.emit(`1>  ${line}\n`);
@@ -152,30 +181,55 @@ export class BuildSystem {
             }
 
             // Step 2: Compile remaining source files with /Yu (use precompiled header)
-            if (nonPchFiles.length > 0 && usePch) {
-                this.emit(`1>  Compiling...\n`);
-            }
+            // Incremental: skip files whose .obj is newer than the source (and PCH, if any)
+            const filesToCompile: string[] = [];
             for (const srcPath of nonPchFiles) {
-                const baseName = path.basename(srcPath);
                 const objName = path.basename(srcPath, path.extname(srcPath)) + '.obj';
                 const objPath = path.join(buildConfig.outputDir, objName);
-
-                this.emit(`1>  ${baseName}\n`);
-
-                const pchOpts = usePch ? { pchMode: 'use' as const, pchHeader: pchHeaderName, pchFile: pchPath } : undefined;
-                const result = await this.compile(srcPath, objPath, project, buildConfig, pchOpts);
-                fullOutput += result.output;
-
-                if (result.rawLines.length > 0) {
-                    for (const line of result.rawLines) this.emit(`1>  ${line}\n`);
-                }
-
-                if (result.errors.length > 0) {
-                    errors.push(...result.errors);
-                } else {
+                if (!pchRebuilt && this.isUpToDate(srcPath, objPath, usePch ? pchPath : undefined)) {
                     objFiles.push(objPath);
-                    warnings.push(...result.warnings);
+                    skippedCount++;
+                } else {
+                    filesToCompile.push(srcPath);
                 }
+            }
+
+            if (skippedCount > 0) {
+                this.emit(`1>  ${skippedCount} file${skippedCount > 1 ? 's' : ''} up-to-date, skipped.\n`);
+            }
+
+            if (filesToCompile.length > 0) {
+                if (usePch) this.emit(`1>  Compiling...\n`);
+
+                // Parallel compilation: run up to N compiles concurrently
+                const maxParallel = Math.min(4, filesToCompile.length);
+                const queue = [...filesToCompile];
+                const compileOne = async (): Promise<void> => {
+                    while (queue.length > 0) {
+                        const srcPath = queue.shift()!;
+                        const baseName = path.basename(srcPath);
+                        const objName = path.basename(srcPath, path.extname(srcPath)) + '.obj';
+                        const objPath = path.join(buildConfig.outputDir, objName);
+
+                        this.emit(`1>  ${baseName}\n`);
+
+                        const pchOpts = usePch ? { pchMode: 'use' as const, pchHeader: pchHeaderName, pchFile: pchPath } : undefined;
+                        const result = await this.compile(srcPath, objPath, project, buildConfig, pchOpts);
+                        fullOutput += result.output;
+
+                        if (result.rawLines.length > 0) {
+                            for (const line of result.rawLines) this.emit(`1>  ${line}\n`);
+                        }
+
+                        if (result.errors.length > 0) {
+                            errors.push(...result.errors);
+                        } else {
+                            objFiles.push(objPath);
+                            warnings.push(...result.warnings);
+                        }
+                    }
+                };
+                await Promise.all(Array.from({ length: maxParallel }, () => compileOne()));
             }
 
             this.emit(`1>  Generating Code...\n`);
@@ -342,10 +396,21 @@ export class BuildSystem {
         // User defines
         for (const def of config.defines) args.push(`/D${def}`);
 
-        // Standard flags
-        args.push('/EHsc', '/W3');
+        // Standard flags — respect project-level compiler options
+        const ehMode = project.exceptionHandling || 'EHsc';
+        if (ehMode !== 'off') args.push(`/${ehMode}`);
+        const warnLevel = project.warningLevel ?? 3;
+        args.push(`/W${warnLevel}`);
+        // RTTI: Xbox 360 default is /GR- (disabled) for performance
+        args.push(project.enableRTTI ? '/GR' : '/GR-');
 
-        // Additional compiler flags
+        // Additional compiler flags from project properties
+        if (project.additionalCompilerFlags) {
+            const extra = project.additionalCompilerFlags.trim().split(/\s+/).filter(Boolean);
+            args.push(...extra);
+        }
+
+        // Additional compiler flags from build config
         args.push(...config.compilerFlags);
 
         // Source file
@@ -356,6 +421,7 @@ export class BuildSystem {
 
     /**
      * Link object files into an executable.
+     * Uses a response file (@file) to avoid the ~8191 char Windows command line limit.
      */
     private async link(
         objFiles: string[],
@@ -373,18 +439,18 @@ export class BuildSystem {
             return { output: '', errors: [{ file: '', line: 0, column: 0, message: 'link.exe not found', severity: 'error' }], warnings: [], rawLines: ['error: link.exe not found in SDK'] };
         }
 
-        const args: string[] = ['/nologo', `/OUT:"${outputPath}"`];
+        const rspArgs: string[] = ['/nologo', `/OUT:"${outputPath}"`];
 
-        if (project.type === 'dll') args.push('/DLL');
+        if (project.type === 'dll') rspArgs.push('/DLL');
 
         // Xbox 360 link.exe infers MACHINE/SUBSYSTEM/ENTRY automatically
 
         // Library paths
         const xboxLib = path.join(sdkPaths.lib, 'xbox');
-        if (fs.existsSync(xboxLib)) args.push(`/LIBPATH:"${xboxLib}"`);
+        if (fs.existsSync(xboxLib)) rspArgs.push(`/LIBPATH:"${xboxLib}"`);
         for (const libDir of (project.libraryDirectories || [])) {
             const libPath = path.isAbsolute(libDir) ? libDir : path.join(project.path, libDir);
-            args.push(`/LIBPATH:"${libPath}"`);
+            rspArgs.push(`/LIBPATH:"${libPath}"`);
         }
 
         // Default Xbox 360 libraries — matches VS2010 project defaults exactly
@@ -402,33 +468,43 @@ export class BuildSystem {
             isDebug ? 'xmcored.lib'  : 'xmcore.lib',
         ];
         if (isDebug) defaultLibs.push('xbdm.lib', 'vcompd.lib');
-        args.push(...defaultLibs);
+        rspArgs.push(...defaultLibs);
 
         // SDK headers auto-link xapilib.lib via #pragma comment(lib).
         // Suppress the release version so it doesn't conflict with xapilibd.lib.
-        if (isDebug) args.push('/NODEFAULTLIB:xapilib.lib');
+        if (isDebug) rspArgs.push('/NODEFAULTLIB:xapilib.lib');
 
         // User libraries
-        for (const lib of (project.libraries || [])) args.push(lib);
+        for (const lib of (project.libraries || [])) rspArgs.push(lib);
 
         // Debug info
         if (config.configuration === 'Debug' || config.configuration === 'Profile') {
-            args.push('/INCREMENTAL');
-            args.push('/DEBUG');
+            rspArgs.push('/INCREMENTAL');
+            rspArgs.push('/DEBUG');
             const pdbPath = outputPath.replace(/\.(exe|dll)$/i, '.pdb');
-            args.push(`/PDB:"${pdbPath}"`);
+            rspArgs.push(`/PDB:"${pdbPath}"`);
         }
 
-        // Additional linker flags
-        args.push(...config.linkerFlags);
+        // Additional linker flags from project properties
+        if (project.additionalLinkerFlags) {
+            const extra = project.additionalLinkerFlags.trim().split(/\s+/).filter(Boolean);
+            rspArgs.push(...extra);
+        }
+
+        // Additional linker flags from build config
+        rspArgs.push(...config.linkerFlags);
 
         // Object files
-        for (const obj of objFiles) args.push(`"${obj}"`);
+        for (const obj of objFiles) rspArgs.push(`"${obj}"`);
 
         // Xbox 360 link.exe: skip XEX generation (done separately by buildXex)
-        args.push('/XEX:NO');
+        rspArgs.push('/XEX:NO');
 
-        return this.runTool(linkPath, args, '');
+        // Write response file to avoid Windows command line length limit (~8191 chars)
+        const rspPath = path.join(config.outputDir, 'link.rsp');
+        fs.writeFileSync(rspPath, rspArgs.join('\n'), 'utf-8');
+
+        return this.runTool(linkPath, [`@"${rspPath}"`], '');
     }
 
     /**
@@ -473,6 +549,26 @@ export class BuildSystem {
     /**
      * Scan project directory for source files.
      */
+    /**
+     * Check if an object file is up-to-date relative to its source.
+     * Returns true if .obj exists and is newer than the source file (and PCH if applicable).
+     */
+    private isUpToDate(srcPath: string, objPath: string, pchPath?: string): boolean {
+        try {
+            if (!fs.existsSync(objPath)) return false;
+            const objMtime = fs.statSync(objPath).mtimeMs;
+            const srcMtime = fs.statSync(srcPath).mtimeMs;
+            if (srcMtime >= objMtime) return false;
+            if (pchPath && fs.existsSync(pchPath)) {
+                const pchMtime = fs.statSync(pchPath).mtimeMs;
+                if (pchMtime >= objMtime) return false;
+            }
+            return true;
+        } catch {
+            return false;
+        }
+    }
+
     private discoverSourceFiles(projectPath: string): string[] {
         const sources: string[] = [];
         const srcDir = path.join(projectPath, 'src');

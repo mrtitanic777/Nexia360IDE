@@ -64,6 +64,145 @@ let defaultProjectsDir: string = '';
 let bottomPanelVisible = true;
 let sidebarVisible = true;
 
+// ── Workspace State ──
+interface WorkspaceState {
+    expandedDirs: string[];
+    openTabs: string[];
+    activeTab: string | null;
+    sidebarVisible: boolean;
+    bottomPanelVisible: boolean;
+    activeSidebarTab: string;
+}
+const DEFAULT_WORKSPACE: WorkspaceState = {
+    expandedDirs: [], openTabs: [], activeTab: null,
+    sidebarVisible: true, bottomPanelVisible: true, activeSidebarTab: 'explorer',
+};
+let workspaceState: WorkspaceState = { ...DEFAULT_WORKSPACE };
+let workspaceSaveTimer: any = null;
+let workspaceRestoring = false;
+
+function getWorkspacePath(): string | null {
+    if (!currentProject?.path) return null;
+    return nodePath.join(currentProject.path, 'nexia-workspace.json');
+}
+
+function loadWorkspaceState(): WorkspaceState {
+    const wsPath = getWorkspacePath();
+    if (!wsPath) return { ...DEFAULT_WORKSPACE };
+    try {
+        if (nodeFs.existsSync(wsPath)) {
+            return { ...DEFAULT_WORKSPACE, ...JSON.parse(nodeFs.readFileSync(wsPath, 'utf-8')) };
+        }
+    } catch {}
+    return { ...DEFAULT_WORKSPACE };
+}
+
+function saveWorkspaceState() {
+    if (workspaceRestoring) return;
+    if (workspaceSaveTimer) clearTimeout(workspaceSaveTimer);
+    workspaceSaveTimer = setTimeout(() => {
+        flushWorkspaceState();
+    }, 300);
+}
+
+function flushWorkspaceState() {
+    if (workspaceRestoring) return;
+    if (workspaceSaveTimer) { clearTimeout(workspaceSaveTimer); workspaceSaveTimer = null; }
+    const wsPath = getWorkspacePath();
+    if (!wsPath) return;
+    try {
+        workspaceState.expandedDirs = collectExpandedDirs();
+        workspaceState.openTabs = openTabs.map(t => t.path);
+        workspaceState.activeTab = activeTab;
+        workspaceState.sidebarVisible = sidebarVisible;
+        workspaceState.bottomPanelVisible = bottomPanelVisible;
+        const activeSidebarEl = document.querySelector('.sidebar-tab.active') as HTMLElement;
+        if (activeSidebarEl) workspaceState.activeSidebarTab = activeSidebarEl.dataset.panel || 'explorer';
+        nodeFs.writeFileSync(wsPath, JSON.stringify(workspaceState, null, 2));
+    } catch (err) {
+        console.error('Failed to save workspace state:', err);
+    }
+}
+
+function collectExpandedDirs(): string[] {
+    const expanded: string[] = [];
+    document.querySelectorAll('#file-tree .tree-children.open').forEach(el => {
+        const header = el.previousElementSibling as HTMLElement;
+        if (header) {
+            const dirPath = header.getAttribute('data-dir-path');
+            if (dirPath && currentProject?.path) {
+                expanded.push(nodePath.relative(currentProject.path, dirPath));
+            }
+        }
+    });
+    document.querySelectorAll('#file-tree .virtual-folder').forEach(el => {
+        const children = el.querySelector('.tree-children') as HTMLElement;
+        if (children?.classList.contains('open')) {
+            const header = el.querySelector('.tree-item') as HTMLElement;
+            const name = header?.querySelector('.tree-name')?.textContent;
+            if (name) expanded.push('__virtual__:' + name);
+        }
+    });
+    const rootChildren = document.querySelector('#file-tree > .tree-children');
+    if (rootChildren?.classList.contains('open')) expanded.push('__project_root__');
+    return expanded;
+}
+
+async function restoreWorkspaceState(state: WorkspaceState) {
+    workspaceRestoring = true;
+    try {
+    for (const relPath of state.expandedDirs) {
+        if (relPath === '__project_root__') continue;
+        if (relPath.startsWith('__virtual__:')) {
+            const name = relPath.replace('__virtual__:', '');
+            document.querySelectorAll('#file-tree .virtual-folder').forEach(el => {
+                const header = el.querySelector('.tree-item') as HTMLElement;
+                const vName = header?.querySelector('.tree-name')?.textContent;
+                if (vName === name) {
+                    const children = el.querySelector('.tree-children') as HTMLElement;
+                    if (children && !children.classList.contains('open')) {
+                        children.classList.add('open');
+                        const arrow = header.querySelector('.tree-arrow') as HTMLElement;
+                        if (arrow) { arrow.textContent = '▼'; arrow.classList.add('expanded'); }
+                    }
+                }
+            });
+            continue;
+        }
+        const absPath = nodePath.join(currentProject.path, relPath);
+        const header = document.querySelector('#file-tree [data-dir-path="' + absPath.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"]') as HTMLElement;
+        if (header) {
+            const children = header.nextElementSibling as HTMLElement;
+            if (children && children.classList.contains('tree-children') && !children.classList.contains('open')) {
+                children.classList.add('open');
+                const arrow = header.querySelector('.tree-arrow') as HTMLElement;
+                const icon = header.querySelector('.tree-icon');
+                if (arrow) { arrow.textContent = '▼'; arrow.classList.add('expanded'); }
+                if (icon) icon.textContent = '📂';
+            }
+        }
+    }
+    if (state.activeSidebarTab) {
+        const tab = document.querySelector('.sidebar-tab[data-panel="' + state.activeSidebarTab + '"]') as HTMLElement;
+        if (tab) tab.click();
+    }
+    if (!state.sidebarVisible && sidebarVisible) toggleSidebar();
+    if (!state.bottomPanelVisible && bottomPanelVisible) toggleBottomPanel();
+
+    await monacoReady;
+    for (const tabPath of state.openTabs) {
+        if (nodeFs.existsSync(tabPath)) {
+            await openFile(tabPath);
+        }
+    }
+    if (state.activeTab && openTabs.some(t => t.path === state.activeTab)) {
+        switchToTab(state.activeTab);
+    }
+    } finally {
+        workspaceRestoring = false;
+    }
+}
+
 // ── Learning System ──
 const learning = require('./learning');
 const quizzes = require('./quizzes');
@@ -126,6 +265,7 @@ interface UserSettings {
     textColor: string;
     textDim: string;
     fancyEffects: boolean;
+    showHiddenFiles: boolean;
 }
 const DEFAULT_SETTINGS: UserSettings = {
     fontSize: 14,
@@ -138,6 +278,7 @@ const DEFAULT_SETTINGS: UserSettings = {
     textColor: '#d0d0e8',
     textDim: '#555580',
     fancyEffects: true,
+    showHiddenFiles: false,
 };
 let userSettings: UserSettings = { ...DEFAULT_SETTINGS };
 const SETTINGS_FILE = nodePath.join(nodeOs.homedir(), '.nexia-ide-prefs.json');
@@ -298,6 +439,7 @@ menuAction('menu-goto-line', () => showGoToLine());
 menuAction('menu-build', () => doBuild());
 menuAction('menu-rebuild', () => doRebuild());
 menuAction('menu-clean', () => doClean());
+menuAction('menu-project-properties', () => showProjectProperties());
 menuAction('menu-deploy', () => $('btn-deploy').click());
 menuAction('menu-toggle-sidebar', () => toggleSidebar());
 menuAction('menu-toggle-output', () => toggleBottomPanel());
@@ -323,7 +465,9 @@ $$('.sidebar-tab').forEach(tab => {
         if (panel === 'study') renderStudyPanel();
         if (panel === 'learn') renderLearnPanel();
         if (panel === 'extensions') renderExtensionsPanel();
+        if (panel === 'tutorials') renderTutorialsPanel();
         if (panel === 'search') setTimeout(() => ($('search-query') as HTMLInputElement).focus(), 50);
+        saveWorkspaceState();
     });
 });
 
@@ -350,6 +494,7 @@ function toggleBottomPanel() {
     $('bottom-resize').classList.toggle('hidden', !bottomPanelVisible);
     $('main').classList.toggle('bottom-hidden', !bottomPanelVisible);
     if (editor) editor.layout();
+    saveWorkspaceState();
 }
 
 function showBottomPanel() {
@@ -361,6 +506,7 @@ function toggleSidebar() {
     $('sidebar').classList.toggle('hidden', !sidebarVisible);
     $('sidebar-resize').style.display = sidebarVisible ? '' : 'none';
     if (editor) editor.layout();
+    saveWorkspaceState();
 }
 
 // ══════════════════════════════════════
@@ -606,6 +752,7 @@ function switchToTab(filePath: string) {
     $('editor-container').style.display = 'block';
     $('welcome-screen').style.display = 'none';
     renderTabs();
+    saveWorkspaceState();
 }
 
 function closeTab(filePath: string) {
@@ -630,6 +777,7 @@ function closeTab(filePath: string) {
         }
     }
     renderTabs();
+    saveWorkspaceState();
 }
 
 function closeAllTabs() {
@@ -639,6 +787,7 @@ function closeAllTabs() {
     $('editor-container').style.display = 'none';
     $('welcome-screen').style.display = 'flex';
     renderTabs();
+    saveWorkspaceState();
 }
 
 function renderTabs() {
@@ -685,10 +834,28 @@ async function saveAllFiles(silent = false) {
 // ══════════════════════════════════════
 //  FILE TREE
 // ══════════════════════════════════════
+// Hidden project files that are filtered unless showHiddenFiles is enabled
+const HIDDEN_PROJECT_FILES = new Set(['nexia.json', 'nexia-workspace.json']);
+
+function filterHiddenProjectFiles(nodes: any[]): any[] {
+    return nodes.filter(node => {
+        if (!node.isDirectory && HIDDEN_PROJECT_FILES.has(node.name)) return false;
+        if (node.isDirectory && node.children) {
+            node.children = filterHiddenProjectFiles(node.children);
+        }
+        return true;
+    });
+}
+
 async function refreshFileTree() {
-    const tree = await ipcRenderer.invoke(IPC.FILE_LIST);
+    let tree = await ipcRenderer.invoke(IPC.FILE_LIST);
     const container = $('file-tree');
     container.innerHTML = '';
+
+    // Filter hidden project files unless setting is enabled
+    if (!userSettings.showHiddenFiles) {
+        tree = filterHiddenProjectFiles(tree);
+    }
 
     if (!currentProject) {
         renderFileTree(tree, container, 0);
@@ -803,10 +970,12 @@ function createVirtualFolder(name: string, icon: string, files: any[], depth: nu
     // Right-click on virtual folder
     header.addEventListener('contextmenu', (e: MouseEvent) => {
         e.preventDefault();
+        const isHeader = slug === 'header-files';
+        const fileContext = isHeader ? 'header' : 'source';
         showContextMenu(e.clientX, e.clientY, [
             { label: 'New File...', action: () => inlineCreateItem('file') },
             { label: '─', action: () => {} },
-            { label: 'Add Existing File...', action: () => addExistingFile() },
+            { label: 'Add Existing File...', action: () => addExistingFile(fileContext as any) },
         ]);
     });
 
@@ -1020,20 +1189,56 @@ async function newFolderInProject() {
     } catch (err: any) { appendOutput(`Create folder failed: ${err.message}\n`); }
 }
 
-async function addExistingFile() {
+async function addExistingFile(context: 'header' | 'source' | 'general' = 'general') {
     if (!currentProject) { appendOutput('Open a project first.\n'); return; }
-    const filePath = await ipcRenderer.invoke(IPC.FILE_SELECT_FILE);
-    if (!filePath) return;
-    const fileName = nodePath.basename(filePath);
-    const srcDir = nodePath.join(currentProject.path, 'src');
-    if (!nodeFs.existsSync(srcDir)) nodeFs.mkdirSync(srcDir, { recursive: true });
-    const dest = nodePath.join(srcDir, fileName);
-    try {
-        nodeFs.copyFileSync(filePath, dest);
+
+    // Build file type filters based on context
+    const HEADER_EXTS = ['h', 'hpp', 'hxx', 'inl'];
+    const SOURCE_EXTS = ['cpp', 'c', 'cc', 'cxx'];
+    const CODE_EXTS = [...SOURCE_EXTS, ...HEADER_EXTS];
+
+    let filters: { name: string; extensions: string[] }[];
+    let destDir: string;
+
+    if (context === 'header') {
+        filters = [
+            { name: 'Header Files', extensions: HEADER_EXTS },
+        ];
+        destDir = nodePath.join(currentProject.path, 'include');
+    } else if (context === 'source') {
+        filters = [
+            { name: 'Source Files', extensions: SOURCE_EXTS },
+        ];
+        destDir = nodePath.join(currentProject.path, 'src');
+    } else {
+        filters = [
+            { name: 'Code Files', extensions: CODE_EXTS },
+            { name: 'All Files', extensions: ['*'] },
+        ];
+        destDir = nodePath.join(currentProject.path, 'src');
+    }
+
+    const filePaths: string[] | null = await ipcRenderer.invoke('file:selectFiles', filters);
+    if (!filePaths || filePaths.length === 0) return;
+    if (!nodeFs.existsSync(destDir)) nodeFs.mkdirSync(destDir, { recursive: true });
+
+    let added = 0;
+    for (const filePath of filePaths) {
+        const fileName = nodePath.basename(filePath);
+        const dest = nodePath.join(destDir, fileName);
+        try {
+            nodeFs.copyFileSync(filePath, dest);
+            added++;
+        } catch (err: any) { appendOutput(`Add file failed (${fileName}): ${err.message}\n`); }
+    }
+
+    if (added > 0) {
         await refreshFileTree();
-        openFile(dest);
-        appendOutput(`Added: ${fileName}\n`);
-    } catch (err: any) { appendOutput(`Add file failed: ${err.message}\n`); }
+        // Open the last added file
+        const lastFile = nodePath.join(destDir, nodePath.basename(filePaths[filePaths.length - 1]));
+        if (nodeFs.existsSync(lastFile)) openFile(lastFile);
+        appendOutput(`Added ${added} file${added > 1 ? 's' : ''}.\n`);
+    }
 }
 
 function renderFileTree(nodes: any[], container: HTMLElement, depth: number, clear: boolean = true) {
@@ -1044,6 +1249,7 @@ function renderFileTree(nodes: any[], container: HTMLElement, depth: number, cle
             const header = document.createElement('div');
             header.className = 'tree-item';
             header.style.paddingLeft = (8 + depth * 16) + 'px';
+            header.setAttribute('data-dir-path', node.path);
             header.innerHTML = `<span class="tree-arrow">▶</span><span class="tree-icon">📁</span><span class="tree-name">${node.name}</span>`;
             const children = document.createElement('div');
             children.className = 'tree-children';
@@ -1057,6 +1263,7 @@ function renderFileTree(nodes: any[], container: HTMLElement, depth: number, cle
                 } else {
                     arrow.textContent = '▶'; arrow.classList.remove('expanded'); icon.textContent = '📁';
                 }
+                saveWorkspaceState();
             });
             header.addEventListener('contextmenu', (e: MouseEvent) => {
                 e.preventDefault();
@@ -1206,13 +1413,14 @@ const LINK_ERROR_RE = /^(.+?\.obj)\s*:\s*(error|warning)\s+(\w+)\s*:\s*(.*)$/;
 
 function appendOutput(text: string) {
     const el = $('output-text');
-    const lines = text.split('\n');
+    // Strip carriage returns from Windows-style line endings
+    const cleaned = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    const lines = cleaned.split('\n');
     for (let i = 0; i < lines.length; i++) {
         const line = lines[i];
-        // Don't add trailing newline for last empty split segment
+        // Skip the trailing empty segment from split (the preceding line already has \n)
         if (i === lines.length - 1 && line === '') {
-            el.appendChild(document.createTextNode('\n'));
-            continue;
+            break;
         }
 
         const msvcMatch = line.match(MSVC_DIAG_RE);
@@ -1408,6 +1616,7 @@ function hasUnsavedChanges(): boolean {
 }
 
 function confirmUnsavedAndClose() {
+    flushWorkspaceState();
     if (hasUnsavedChanges()) {
         const choice = confirm('You have unsaved changes. Save all before closing?');
         if (choice) {
@@ -1417,6 +1626,11 @@ function confirmUnsavedAndClose() {
     }
     ipcRenderer.send(IPC.APP_CLOSE);
 }
+
+// Safety net: also flush workspace state if the window is being unloaded
+window.addEventListener('beforeunload', () => {
+    flushWorkspaceState();
+});
 
 // ══════════════════════════════════════
 //  BUILD
@@ -1457,6 +1671,51 @@ function setBuildStatus(state: 'ready' | 'building' | 'succeeded' | 'failed') {
     el.textContent = labels[state];
     el.className = 'status-build-' + state;
 }
+
+// ── Project Properties Dialog ──
+function showProjectProperties() {
+    if (!currentProject) { appendOutput('No project open.\n'); return; }
+
+    // Populate controls from current project config
+    ($('pp-enable-rtti') as HTMLInputElement).checked = !!currentProject.enableRTTI;
+    ($('pp-exception-handling') as HTMLSelectElement).value = currentProject.exceptionHandling || 'EHsc';
+    ($('pp-warning-level') as HTMLSelectElement).value = String(currentProject.warningLevel ?? 3);
+    ($('pp-extra-cl-flags') as HTMLInputElement).value = currentProject.additionalCompilerFlags || '';
+    ($('pp-extra-link-flags') as HTMLInputElement).value = currentProject.additionalLinkerFlags || '';
+
+    $('project-props-overlay').classList.remove('hidden');
+}
+
+$('pp-cancel').addEventListener('click', () => {
+    $('project-props-overlay').classList.add('hidden');
+});
+
+$('pp-save').addEventListener('click', async () => {
+    if (!currentProject) return;
+
+    currentProject.enableRTTI = ($('pp-enable-rtti') as HTMLInputElement).checked;
+    currentProject.exceptionHandling = ($('pp-exception-handling') as HTMLSelectElement).value as any;
+    currentProject.warningLevel = parseInt(($('pp-warning-level') as HTMLSelectElement).value, 10) as any;
+    currentProject.additionalCompilerFlags = ($('pp-extra-cl-flags') as HTMLInputElement).value.trim();
+    currentProject.additionalLinkerFlags = ($('pp-extra-link-flags') as HTMLInputElement).value.trim();
+
+    // Persist to nexia.json
+    try {
+        await ipcRenderer.invoke(IPC.PROJECT_SAVE, currentProject);
+        appendOutput('Project properties saved.\n');
+    } catch (err: any) {
+        appendOutput(`Failed to save project properties: ${err.message}\n`);
+    }
+
+    $('project-props-overlay').classList.add('hidden');
+});
+
+// Close on overlay background click
+$('project-props-overlay').addEventListener('click', (e: MouseEvent) => {
+    if (e.target === $('project-props-overlay')) {
+        $('project-props-overlay').classList.add('hidden');
+    }
+});
 
 ipcRenderer.on(IPC.BUILD_OUTPUT, (_e: any, data: string) => appendOutput(data));
 ipcRenderer.on(IPC.TOOL_OUTPUT, (_e: any, data: string) => appendOutput(data));
@@ -1527,14 +1786,28 @@ async function jumpToError(err: any) {
 async function openProject(dir?: string) {
     const project = await ipcRenderer.invoke(IPC.PROJECT_OPEN, dir);
     if (!project) return;
+
+    // Close any currently open tabs from a previous project
+    for (const tab of openTabs) tab.model.dispose();
+    openTabs = [];
+    activeTab = null;
+
     currentProject = project;
     $('titlebar-project').textContent = `— ${project.name}`;
     await refreshFileTree();
-    if (project.sourceFiles?.length > 0) {
-        const mainFile = project.sourceFiles.find((f: string) => /main\.(cpp|c)$/i.test(f))
-                      || project.sourceFiles[project.sourceFiles.length - 1];
-        const f = nodePath.isAbsolute(mainFile) ? mainFile : nodePath.join(project.path, mainFile);
-        openFile(f);
+
+    // Try to restore saved workspace state
+    const savedState = loadWorkspaceState();
+    if (savedState.openTabs.length > 0) {
+        await restoreWorkspaceState(savedState);
+    } else {
+        // No saved state: fall back to opening main source file
+        if (project.sourceFiles?.length > 0) {
+            const mainFile = project.sourceFiles.find((f: string) => /main\.(cpp|c)$/i.test(f))
+                          || project.sourceFiles[project.sourceFiles.length - 1];
+            const f = nodePath.isAbsolute(mainFile) ? mainFile : nodePath.join(project.path, mainFile);
+            openFile(f);
+        }
     }
     $('welcome-screen').style.display = 'none';
 }
@@ -2678,6 +2951,7 @@ function showSettingsPanel() {
     });
     ($('setting-font-size') as HTMLInputElement).value = String(userSettings.fontSize);
     ($('setting-fancy-effects') as HTMLInputElement).checked = userSettings.fancyEffects;
+    ($('setting-show-hidden-files') as HTMLInputElement).checked = userSettings.showHiddenFiles;
     $('settings-overlay').classList.remove('hidden');
 }
 
@@ -2756,6 +3030,11 @@ document.addEventListener('change', (e) => {
         userSettings.fancyEffects = target.checked;
         applyFancyMode();
         saveUserSettings();
+    }
+    if (target.id === 'setting-show-hidden-files') {
+        userSettings.showHiddenFiles = target.checked;
+        saveUserSettings();
+        refreshFileTree();
     }
 });
 
@@ -3617,6 +3896,122 @@ async function pollFeed() {
             renderFeedCards(feedEl, threads);
         }
     } catch {}
+}
+
+// ══════════════════════════════════════
+//  TUTORIALS PANEL
+// ══════════════════════════════════════
+interface TutorialVideo {
+    id: string;
+    title: string;
+    description: string;
+    duration?: string;
+}
+
+const TUTORIAL_VIDEOS: TutorialVideo[] = [
+    {
+        id: 'dQw4w9WgXcQ',
+        title: 'Getting Started with Nexia IDE',
+        description: 'Install, configure the Xbox 360 SDK, and create your first project.',
+        duration: '12:34',
+    },
+    {
+        id: 'dQw4w9WgXcQ',
+        title: 'Build Pipeline Walkthrough',
+        description: 'Compile, link, and package your Xbox 360 homebrew into a deployable XEX.',
+        duration: '18:02',
+    },
+    {
+        id: 'dQw4w9WgXcQ',
+        title: 'Dev Kit Deployment & Debugging',
+        description: 'Connect to your dev kit, deploy builds, take screenshots, and debug live.',
+        duration: '15:20',
+    },
+    {
+        id: 'dQw4w9WgXcQ',
+        title: 'D3D9 Graphics on Xbox 360',
+        description: 'Set up Direct3D, create shaders, and render your first 3D scene.',
+        duration: '22:45',
+    },
+    {
+        id: 'dQw4w9WgXcQ',
+        title: 'XUI User Interfaces',
+        description: 'Build Xbox-native UIs with XUI scenes, buttons, and navigation.',
+        duration: '14:10',
+    },
+    {
+        id: 'dQw4w9WgXcQ',
+        title: 'Using the Extensions System',
+        description: 'Install, create, and manage IDE extensions to customize your workflow.',
+        duration: '10:55',
+    },
+];
+
+function renderTutorialsPanel() {
+    const panel = $('tutorials-panel');
+    if (!panel) return;
+
+    let html = `
+        <div style="padding:8px 12px;">
+            <p style="font-size:11px; color:var(--text-dim); margin:0 0 12px 0; line-height:1.5;">
+                Video tutorials to help you get started with Xbox 360 homebrew development in Nexia IDE.
+            </p>
+    `;
+
+    for (const video of TUTORIAL_VIDEOS) {
+        const thumbUrl = `https://img.youtube.com/vi/${video.id}/mqdefault.jpg`;
+        html += `
+            <div class="tutorial-card" data-video-id="${video.id}" style="
+                margin-bottom:10px; border-radius:6px; overflow:hidden;
+                background:var(--bg-panel); border:1px solid rgba(255,255,255,0.06);
+                cursor:pointer; transition:border-color 0.2s;
+            ">
+                <div style="position:relative; width:100%; padding-top:56.25%; background:#000;">
+                    <img src="${thumbUrl}" style="position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover;"
+                         onerror="this.style.display='none'">
+                    <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
+                        width:40px;height:40px;border-radius:50%;background:rgba(255,0,0,0.85);
+                        display:flex;align-items:center;justify-content:center;">
+                        <div style="width:0;height:0;border-left:14px solid #fff;border-top:8px solid transparent;border-bottom:8px solid transparent;margin-left:3px;"></div>
+                    </div>
+                    ${video.duration ? `<span style="position:absolute;bottom:4px;right:4px;background:rgba(0,0,0,0.8);color:#fff;font-size:10px;padding:1px 5px;border-radius:3px;">${video.duration}</span>` : ''}
+                </div>
+                <div style="padding:8px 10px;">
+                    <div style="font-size:12px;font-weight:600;color:var(--text);line-height:1.3;margin-bottom:3px;">${video.title}</div>
+                    <div style="font-size:10px;color:var(--text-dim);line-height:1.4;">${video.description}</div>
+                </div>
+            </div>
+        `;
+    }
+
+    html += `
+            <div style="margin-top:16px; text-align:center;">
+                <button class="setup-btn" id="tutorials-open-channel" style="font-size:11px;">
+                    View All on YouTube
+                </button>
+            </div>
+        </div>
+    `;
+
+    panel.innerHTML = html;
+
+    // Click to open videos in external browser
+    panel.querySelectorAll('.tutorial-card').forEach((card: Element) => {
+        card.addEventListener('click', () => {
+            const videoId = (card as HTMLElement).dataset.videoId;
+            if (videoId) shell.openExternal(`https://www.youtube.com/watch?v=${videoId}`);
+        });
+        (card as HTMLElement).addEventListener('mouseenter', () => {
+            (card as HTMLElement).style.borderColor = 'var(--green)';
+        });
+        (card as HTMLElement).addEventListener('mouseleave', () => {
+            (card as HTMLElement).style.borderColor = 'rgba(255,255,255,0.06)';
+        });
+    });
+
+    document.getElementById('tutorials-open-channel')?.addEventListener('click', () => {
+        shell.openExternal('https://www.youtube.com/@NexiaIDE');
+    });
 }
 
 function renderCommunityPanel() {
@@ -4537,6 +4932,92 @@ $('search-query').addEventListener('keydown', (e: KeyboardEvent) => {
 $('search-show-replace').addEventListener('change', () => {
     const show = ($('search-show-replace') as HTMLInputElement).checked;
     $('search-replace').classList.toggle('hidden', !show);
+    const actions = $('replace-actions');
+    if (show) {
+        actions.classList.remove('hidden');
+        actions.style.display = 'flex';
+    } else {
+        actions.classList.add('hidden');
+        actions.style.display = 'none';
+    }
+});
+
+// Replace All in files
+$('btn-replace-all').addEventListener('click', () => {
+    const query = ($('search-query') as HTMLInputElement).value;
+    const replacement = ($('search-replace') as HTMLInputElement).value;
+    const caseSensitive = ($('search-case') as HTMLInputElement).checked;
+    const useRegex = ($('search-regex') as HTMLInputElement).checked;
+    const include = ($('search-include') as HTMLInputElement).value;
+
+    if (!query || !currentProject) return;
+
+    const results = searchInFiles(query, caseSensitive, useRegex, include);
+    if (results.length === 0) {
+        appendOutput('Replace: No matches found.\n');
+        return;
+    }
+
+    // Group by file
+    const fileGroups = new Map<string, SearchMatch[]>();
+    for (const r of results) {
+        const arr = fileGroups.get(r.file) || [];
+        arr.push(r);
+        fileGroups.set(r.file, arr);
+    }
+
+    const fileCount = fileGroups.size;
+    const matchCount = results.length;
+    const confirmMsg = `Replace ${matchCount} occurrence${matchCount > 1 ? 's' : ''} across ${fileCount} file${fileCount > 1 ? 's' : ''}?`;
+    if (!confirm(confirmMsg)) return;
+
+    let re: RegExp;
+    try {
+        const flags = caseSensitive ? 'g' : 'gi';
+        re = useRegex ? new RegExp(query, flags) : new RegExp(escapeRegExp(query), flags);
+    } catch { return; }
+
+    let replacedFiles = 0;
+    let totalReplacements = 0;
+
+    for (const [file] of fileGroups) {
+        try {
+            const content = nodeFs.readFileSync(file, 'utf-8');
+            const newContent = content.replace(re, replacement);
+            if (newContent !== content) {
+                nodeFs.writeFileSync(file, newContent, 'utf-8');
+                replacedFiles++;
+                // Count replacements in this file
+                re.lastIndex = 0;
+                let count = 0;
+                const lines = content.split('\n');
+                for (const line of lines) {
+                    re.lastIndex = 0;
+                    let m;
+                    while ((m = re.exec(line)) !== null) {
+                        count++;
+                        if (!re.global) break;
+                        if (m[0].length === 0) re.lastIndex++;
+                    }
+                }
+                totalReplacements += count;
+
+                // Update any open tab model for this file
+                const openTab = openTabs.find(t => t.path === file);
+                if (openTab) {
+                    openTab.model.setValue(newContent);
+                    openTab.modified = false;
+                }
+            }
+        } catch (err: any) {
+            appendOutput(`Replace failed in ${nodePath.basename(file)}: ${err.message}\n`);
+        }
+    }
+
+    appendOutput(`Replaced ${totalReplacements} occurrence${totalReplacements > 1 ? 's' : ''} in ${replacedFiles} file${replacedFiles > 1 ? 's' : ''}.\n`);
+
+    // Re-run search to update results
+    triggerSearch();
 });
 
 function openFindInFiles() {
@@ -4660,6 +5141,7 @@ async function init() {
     renderLearnPanel();
     renderTipsPanel();
     renderStudyPanel();
+    renderTutorialsPanel();
     renderCommunityPanel();
     const state = await ipcRenderer.invoke(IPC.APP_READY);
     defaultProjectsDir = state.projectsDir || '';

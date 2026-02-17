@@ -38,6 +38,13 @@ export interface ProjectConfig {
     defines: string[];
     configuration: 'Debug' | 'Release' | 'Profile';
     pchHeader?: string;  // Precompiled header name, e.g. "stdafx.h"
+
+    // Compiler options
+    enableRTTI?: boolean;            // /GR vs /GR- (default: false)
+    exceptionHandling?: 'EHsc' | 'EHs' | 'EHa' | 'off';  // default: EHsc
+    warningLevel?: 0 | 1 | 2 | 3 | 4;   // /W0-/W4 (default: 3)
+    additionalCompilerFlags?: string;     // Free-form extra cl.exe flags
+    additionalLinkerFlags?: string;       // Free-form extra link.exe flags
 }
 
 export interface ProjectTemplate {
