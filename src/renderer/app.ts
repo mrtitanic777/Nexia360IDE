@@ -14,6 +14,7 @@ const IPC = {
     PROJECT_NEW: 'project:new', PROJECT_OPEN: 'project:open',
     PROJECT_SAVE: 'project:save', PROJECT_GET_CONFIG: 'project:getConfig',
     PROJECT_GET_TEMPLATES: 'project:getTemplates',
+    PROJECT_EXPORT: 'project:export', PROJECT_IMPORT: 'project:import',
     FILE_READ: 'file:read', FILE_WRITE: 'file:write', FILE_LIST: 'file:list',
     FILE_CREATE: 'file:create', FILE_DELETE: 'file:delete', FILE_RENAME: 'file:rename',
     FILE_SELECT_DIR: 'file:selectDir', FILE_SELECT_FILE: 'file:selectFile',
@@ -31,7 +32,6 @@ const IPC = {
     DEVKIT_VOLUMES: 'devkit:volumes',
     DEVKIT_DEPLOY: 'devkit:deploy', DEVKIT_LAUNCH: 'devkit:launch', DEVKIT_REBOOT: 'devkit:reboot',
     DEVKIT_SCREENSHOT: 'devkit:screenshot', DEVKIT_FILE_MANAGER: 'devkit:fileManager',
-    DEVKIT_COPY_TO: 'devkit:copyTo',
     EMU_LAUNCH: 'emu:launch', EMU_STOP: 'emu:stop', EMU_PAUSE: 'emu:pause',
     EMU_RESUME: 'emu:resume', EMU_STEP: 'emu:step', EMU_STEP_OVER: 'emu:stepOver',
     EMU_STATE: 'emu:state',
@@ -50,6 +50,7 @@ const IPC = {
     DISCORD_CREATE_THREAD: 'discord:createThread', DISCORD_REPLY: 'discord:reply',
     DISCORD_DOWNLOAD: 'discord:download', DISCORD_AUTH_START: 'discord:authStart',
     DISCORD_AUTH_USER: 'discord:authUser', DISCORD_AUTH_LOGOUT: 'discord:authLogout',
+    XEX_INSPECT: 'xex:inspect',
 };
 
 // ── State ──
@@ -64,145 +65,6 @@ let lastBuiltXex: string | null = null;
 let defaultProjectsDir: string = '';
 let bottomPanelVisible = true;
 let sidebarVisible = true;
-
-// ── Workspace State ──
-interface WorkspaceState {
-    expandedDirs: string[];
-    openTabs: string[];
-    activeTab: string | null;
-    sidebarVisible: boolean;
-    bottomPanelVisible: boolean;
-    activeSidebarTab: string;
-}
-const DEFAULT_WORKSPACE: WorkspaceState = {
-    expandedDirs: [], openTabs: [], activeTab: null,
-    sidebarVisible: true, bottomPanelVisible: true, activeSidebarTab: 'explorer',
-};
-let workspaceState: WorkspaceState = { ...DEFAULT_WORKSPACE };
-let workspaceSaveTimer: any = null;
-let workspaceRestoring = false;
-
-function getWorkspacePath(): string | null {
-    if (!currentProject?.path) return null;
-    return nodePath.join(currentProject.path, 'nexia-workspace.json');
-}
-
-function loadWorkspaceState(): WorkspaceState {
-    const wsPath = getWorkspacePath();
-    if (!wsPath) return { ...DEFAULT_WORKSPACE };
-    try {
-        if (nodeFs.existsSync(wsPath)) {
-            return { ...DEFAULT_WORKSPACE, ...JSON.parse(nodeFs.readFileSync(wsPath, 'utf-8')) };
-        }
-    } catch {}
-    return { ...DEFAULT_WORKSPACE };
-}
-
-function saveWorkspaceState() {
-    if (workspaceRestoring) return;
-    if (workspaceSaveTimer) clearTimeout(workspaceSaveTimer);
-    workspaceSaveTimer = setTimeout(() => {
-        flushWorkspaceState();
-    }, 300);
-}
-
-function flushWorkspaceState() {
-    if (workspaceRestoring) return;
-    if (workspaceSaveTimer) { clearTimeout(workspaceSaveTimer); workspaceSaveTimer = null; }
-    const wsPath = getWorkspacePath();
-    if (!wsPath) return;
-    try {
-        workspaceState.expandedDirs = collectExpandedDirs();
-        workspaceState.openTabs = openTabs.map(t => t.path);
-        workspaceState.activeTab = activeTab;
-        workspaceState.sidebarVisible = sidebarVisible;
-        workspaceState.bottomPanelVisible = bottomPanelVisible;
-        const activeSidebarEl = document.querySelector('.sidebar-tab.active') as HTMLElement;
-        if (activeSidebarEl) workspaceState.activeSidebarTab = activeSidebarEl.dataset.panel || 'explorer';
-        nodeFs.writeFileSync(wsPath, JSON.stringify(workspaceState, null, 2));
-    } catch (err) {
-        console.error('Failed to save workspace state:', err);
-    }
-}
-
-function collectExpandedDirs(): string[] {
-    const expanded: string[] = [];
-    document.querySelectorAll('#file-tree .tree-children.open').forEach(el => {
-        const header = el.previousElementSibling as HTMLElement;
-        if (header) {
-            const dirPath = header.getAttribute('data-dir-path');
-            if (dirPath && currentProject?.path) {
-                expanded.push(nodePath.relative(currentProject.path, dirPath));
-            }
-        }
-    });
-    document.querySelectorAll('#file-tree .virtual-folder').forEach(el => {
-        const children = el.querySelector('.tree-children') as HTMLElement;
-        if (children?.classList.contains('open')) {
-            const header = el.querySelector('.tree-item') as HTMLElement;
-            const name = header?.querySelector('.tree-name')?.textContent;
-            if (name) expanded.push('__virtual__:' + name);
-        }
-    });
-    const rootChildren = document.querySelector('#file-tree > .tree-children');
-    if (rootChildren?.classList.contains('open')) expanded.push('__project_root__');
-    return expanded;
-}
-
-async function restoreWorkspaceState(state: WorkspaceState) {
-    workspaceRestoring = true;
-    try {
-    for (const relPath of state.expandedDirs) {
-        if (relPath === '__project_root__') continue;
-        if (relPath.startsWith('__virtual__:')) {
-            const name = relPath.replace('__virtual__:', '');
-            document.querySelectorAll('#file-tree .virtual-folder').forEach(el => {
-                const header = el.querySelector('.tree-item') as HTMLElement;
-                const vName = header?.querySelector('.tree-name')?.textContent;
-                if (vName === name) {
-                    const children = el.querySelector('.tree-children') as HTMLElement;
-                    if (children && !children.classList.contains('open')) {
-                        children.classList.add('open');
-                        const arrow = header.querySelector('.tree-arrow') as HTMLElement;
-                        if (arrow) { arrow.textContent = '▼'; arrow.classList.add('expanded'); }
-                    }
-                }
-            });
-            continue;
-        }
-        const absPath = nodePath.join(currentProject.path, relPath);
-        const header = document.querySelector('#file-tree [data-dir-path="' + absPath.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"]') as HTMLElement;
-        if (header) {
-            const children = header.nextElementSibling as HTMLElement;
-            if (children && children.classList.contains('tree-children') && !children.classList.contains('open')) {
-                children.classList.add('open');
-                const arrow = header.querySelector('.tree-arrow') as HTMLElement;
-                const icon = header.querySelector('.tree-icon');
-                if (arrow) { arrow.textContent = '▼'; arrow.classList.add('expanded'); }
-                if (icon) icon.textContent = '📂';
-            }
-        }
-    }
-    if (state.activeSidebarTab) {
-        const tab = document.querySelector('.sidebar-tab[data-panel="' + state.activeSidebarTab + '"]') as HTMLElement;
-        if (tab) tab.click();
-    }
-    if (!state.sidebarVisible && sidebarVisible) toggleSidebar();
-    if (!state.bottomPanelVisible && bottomPanelVisible) toggleBottomPanel();
-
-    await monacoReady;
-    for (const tabPath of state.openTabs) {
-        if (nodeFs.existsSync(tabPath)) {
-            await openFile(tabPath);
-        }
-    }
-    if (state.activeTab && openTabs.some(t => t.path === state.activeTab)) {
-        switchToTab(state.activeTab);
-    }
-    } finally {
-        workspaceRestoring = false;
-    }
-}
 
 // ── Learning System ──
 const learning = require('./learning');
@@ -266,20 +128,35 @@ interface UserSettings {
     textColor: string;
     textDim: string;
     fancyEffects: boolean;
-    showHiddenFiles: boolean;
+    // AI settings
+    aiProvider: 'anthropic' | 'openai' | 'local' | 'custom';
+    aiApiKey: string;
+    aiEndpoint: string;
+    aiModel: string;
+    aiSystemPrompt: string;
+    aiAutoErrors: boolean;
+    aiInlineSuggest: boolean;
+    aiFileContext: boolean;
 }
 const DEFAULT_SETTINGS: UserSettings = {
     fontSize: 14,
-    accentColor: '#00e676',
-    bgDark: '#06060f',
-    bgMain: '#0c0c1a',
-    bgPanel: '#0a0e1e',
-    bgSidebar: '#080914',
-    editorBg: '#0c0c1a',
-    textColor: '#d0d0e8',
-    textDim: '#555580',
+    accentColor: '#4ec9b0',
+    bgDark: '#181818',
+    bgMain: '#1e1e1e',
+    bgPanel: '#1e1e1e',
+    bgSidebar: '#252526',
+    editorBg: '#1e1e1e',
+    textColor: '#cccccc',
+    textDim: '#858585',
     fancyEffects: true,
-    showHiddenFiles: false,
+    aiProvider: 'anthropic',
+    aiApiKey: '',
+    aiEndpoint: '',
+    aiModel: 'auto',
+    aiSystemPrompt: '',
+    aiAutoErrors: true,
+    aiInlineSuggest: false,
+    aiFileContext: true,
 };
 let userSettings: UserSettings = { ...DEFAULT_SETTINGS };
 const SETTINGS_FILE = nodePath.join(nodeOs.homedir(), '.nexia-ide-prefs.json');
@@ -293,6 +170,8 @@ function loadUserSettings() {
             const OLD_DEFAULTS: Record<string, string> = {
                 bgDark: '#0d0d1a', bgMain: '#1a1a2e', bgPanel: '#16213e',
                 bgSidebar: '#0f1526', editorBg: '#1a1a2e', textDim: '#8888aa',
+                // Also migrate v2 dark defaults
+                // bgDark: '#06060f' etc already handled by spread with new DEFAULT_SETTINGS
             };
             let migrated = false;
             for (const [key, oldVal] of Object.entries(OLD_DEFAULTS)) {
@@ -316,18 +195,29 @@ function applyThemeColors() {
     // Compute dim/bg variants from accent
     r.setProperty('--green-dark', shiftColor(userSettings.accentColor, -20));
     r.setProperty('--green-dim', shiftColor(userSettings.accentColor, -60));
+    r.setProperty('--green-bright', shiftColor(userSettings.accentColor, 30));
     r.setProperty('--green-bg', userSettings.accentColor + '14');
     r.setProperty('--green-bg-hover', userSettings.accentColor + '26');
-    // Glow variants for enhancements
     r.setProperty('--green-glow', userSettings.accentColor + '28');
     r.setProperty('--green-glow-strong', userSettings.accentColor + '55');
     r.setProperty('--green-glow-soft', userSettings.accentColor + '10');
     r.setProperty('--bg-dark', userSettings.bgDark);
+    r.setProperty('--bg-base', userSettings.bgMain);
     r.setProperty('--bg-main', userSettings.bgMain);
     r.setProperty('--bg-panel', userSettings.bgPanel);
     r.setProperty('--bg-sidebar', userSettings.bgSidebar);
+    r.setProperty('--bg-titlebar', shiftColor(userSettings.bgMain, 20));
+    r.setProperty('--bg-activitybar', shiftColor(userSettings.bgSidebar, 14));
+    r.setProperty('--bg-tab', shiftColor(userSettings.bgMain, 15));
+    r.setProperty('--bg-tab-active', userSettings.bgMain);
+    r.setProperty('--bg-elevated', shiftColor(userSettings.bgMain, 15));
+    r.setProperty('--bg-input', shiftColor(userSettings.bgMain, 20));
+    r.setProperty('--bg-hover', shiftColor(userSettings.bgMain, 12));
+    r.setProperty('--bg-active', shiftColor(userSettings.bgMain, 25));
     r.setProperty('--text', userSettings.textColor);
+    r.setProperty('--text-bright', shiftColor(userSettings.textColor, 30));
     r.setProperty('--text-dim', userSettings.textDim);
+    r.setProperty('--text-muted', shiftColor(userSettings.textDim, -40));
 
     // Update Monaco editor theme if loaded
     const monaco = (window as any).monaco;
@@ -353,7 +243,7 @@ function applyThemeColors() {
                 'editor.lineHighlightBackground': shiftColor(userSettings.editorBg, 10),
                 'editorCursor.foreground': userSettings.accentColor,
                 'editorSuggestWidget.background': userSettings.bgPanel,
-                'editorSuggestWidget.border': '#2a2a4a',
+                'editorSuggestWidget.border': '#3c3c3c',
             },
         });
         monaco.editor.setTheme('nexia-dark');
@@ -440,7 +330,6 @@ menuAction('menu-goto-line', () => showGoToLine());
 menuAction('menu-build', () => doBuild());
 menuAction('menu-rebuild', () => doRebuild());
 menuAction('menu-clean', () => doClean());
-menuAction('menu-project-properties', () => showProjectProperties());
 menuAction('menu-deploy', () => $('btn-deploy').click());
 menuAction('menu-toggle-sidebar', () => toggleSidebar());
 menuAction('menu-toggle-output', () => toggleBottomPanel());
@@ -450,6 +339,7 @@ menuAction('menu-extensions', () => {
     if (tab) tab.click();
 });
 menuAction('menu-sdk-tools', () => showSdkToolsDialog());
+menuAction('menu-xex-inspector', () => openXexInspector());
 menuAction('menu-settings', () => showSettingsPanel());
 
 // ══════════════════════════════════════
@@ -466,9 +356,7 @@ $$('.sidebar-tab').forEach(tab => {
         if (panel === 'study') renderStudyPanel();
         if (panel === 'learn') renderLearnPanel();
         if (panel === 'extensions') renderExtensionsPanel();
-        if (panel === 'tutorials') renderTutorialsPanel();
         if (panel === 'search') setTimeout(() => ($('search-query') as HTMLInputElement).focus(), 50);
-        saveWorkspaceState();
     });
 });
 
@@ -495,7 +383,6 @@ function toggleBottomPanel() {
     $('bottom-resize').classList.toggle('hidden', !bottomPanelVisible);
     $('main').classList.toggle('bottom-hidden', !bottomPanelVisible);
     if (editor) editor.layout();
-    saveWorkspaceState();
 }
 
 function showBottomPanel() {
@@ -507,7 +394,6 @@ function toggleSidebar() {
     $('sidebar').classList.toggle('hidden', !sidebarVisible);
     $('sidebar-resize').style.display = sidebarVisible ? '' : 'none';
     if (editor) editor.layout();
-    saveWorkspaceState();
 }
 
 // ══════════════════════════════════════
@@ -636,7 +522,7 @@ function createEditor() {
             'editor.lineHighlightBackground': shiftColor(userSettings.editorBg, 10),
             'editorCursor.foreground': userSettings.accentColor,
             'editorSuggestWidget.background': userSettings.bgPanel,
-            'editorSuggestWidget.border': '#2a2a4a',
+            'editorSuggestWidget.border': '#3c3c3c',
         },
     });
 
@@ -660,26 +546,62 @@ function createEditor() {
         }
     });
 
-    // Ctrl+Scroll to zoom
+    // Editor font zoom
     let fontSize = userSettings.fontSize || 14;
-    $('editor-container').addEventListener('wheel', (e: WheelEvent) => {
-        if (!e.ctrlKey) return;
-        e.preventDefault();
-        e.stopPropagation();
-        if (e.deltaY < 0) fontSize = Math.min(40, fontSize + 1);
-        else fontSize = Math.max(8, fontSize - 1);
-        editor.updateOptions({ fontSize });
-        $('status-zoom').textContent = `${Math.round((fontSize / 14) * 100)}%`;
-        userSettings.fontSize = fontSize;
-        saveUserSettings();
-    }, { passive: false });
-
-    // Apply saved font size
     editor.updateOptions({ fontSize });
     $('status-zoom').textContent = `${Math.round((fontSize / 14) * 100)}%`;
 
     registerXbox360Completions(monaco);
     initCodeHelper();
+
+    // ── AI integration with Monaco editor ──
+    // Add right-click context menu actions
+    editor.addAction({
+        id: 'nexia-ai-ask',
+        label: '🤖 Ask AI about this code',
+        contextMenuGroupId: '9_ai',
+        contextMenuOrder: 1,
+        run: () => {
+            const sel = editor.getModel()?.getValueInRange(editor.getSelection());
+            switchToAIPanel();
+            if (sel) setAIContext(sel);
+            ($('ai-input') as HTMLTextAreaElement).focus();
+        },
+    });
+    editor.addAction({
+        id: 'nexia-ai-explain',
+        label: '📖 Explain this code',
+        contextMenuGroupId: '9_ai',
+        contextMenuOrder: 2,
+        precondition: 'editorHasSelection',
+        run: () => {
+            const sel = editor.getModel()?.getValueInRange(editor.getSelection());
+            if (sel) { switchToAIPanel(); sendAIMessage('Explain this code in detail:', sel); }
+        },
+    });
+    editor.addAction({
+        id: 'nexia-ai-fix',
+        label: '🔧 Fix / improve this code',
+        contextMenuGroupId: '9_ai',
+        contextMenuOrder: 3,
+        precondition: 'editorHasSelection',
+        run: () => {
+            const sel = editor.getModel()?.getValueInRange(editor.getSelection());
+            if (sel) { switchToAIPanel(); sendAIMessage('Fix any bugs and suggest improvements:', sel); }
+        },
+    });
+    editor.addAction({
+        id: 'nexia-ai-generate',
+        label: '⚡ Generate code here',
+        contextMenuGroupId: '9_ai',
+        contextMenuOrder: 4,
+        run: () => { switchToAIPanel(); switchAIMode('generate'); ($('ai-gen-prompt') as HTMLTextAreaElement).focus(); },
+    });
+
+    // Inline AI suggestions trigger (fires on content change with debounce)
+    editor.onDidChangeModelContent(() => {
+        if (userSettings.aiInlineSuggest) triggerInlineSuggestion();
+    });
 
     appendOutput('Editor ready.\n');
     monacoResolve();
@@ -749,18 +671,28 @@ function switchToTab(filePath: string) {
     const tab = openTabs.find(t => t.path === filePath);
     if (!tab) return;
     activeTab = filePath;
-    if (editor) editor.setModel(tab.model);
-    $('editor-container').style.display = 'block';
-    $('welcome-screen').style.display = 'none';
+
+    // Handle XEX Inspector tabs
+    if (filePath.startsWith('__xex_inspector__:')) {
+        $('editor-container').style.display = 'none';
+        $('welcome-screen').style.display = 'none';
+        if (xexInspectorContainer) xexInspectorContainer.style.display = 'block';
+    } else {
+        if (xexInspectorContainer) xexInspectorContainer.style.display = 'none';
+        if (editor) editor.setModel(tab.model);
+        $('editor-container').style.display = 'block';
+        $('welcome-screen').style.display = 'none';
+        updateBreadcrumb(filePath);
+    }
     renderTabs();
-    saveWorkspaceState();
 }
 
 function closeTab(filePath: string) {
     const idx = openTabs.findIndex(t => t.path === filePath);
     if (idx === -1) return;
     const tab = openTabs[idx];
-    if (tab.modified) {
+    // Don't prompt save for XEX inspector tabs
+    if (!filePath.startsWith('__xex_inspector__:') && tab.modified) {
         const save = confirm(`"${tab.name}" has unsaved changes. Save before closing?`);
         if (save) {
             ipcRenderer.invoke(IPC.FILE_WRITE, tab.path, tab.model.getValue());
@@ -769,16 +701,18 @@ function closeTab(filePath: string) {
     tab.model.dispose();
     openTabs.splice(idx, 1);
     if (activeTab === filePath) {
+        // Hide XEX inspector if it was active
+        if (xexInspectorContainer) xexInspectorContainer.style.display = 'none';
         if (openTabs.length > 0) {
             switchToTab(openTabs[Math.min(idx, openTabs.length - 1)].path);
         } else {
             activeTab = null;
             $('editor-container').style.display = 'none';
             $('welcome-screen').style.display = 'flex';
+            updateBreadcrumb();
         }
     }
     renderTabs();
-    saveWorkspaceState();
 }
 
 function closeAllTabs() {
@@ -786,9 +720,10 @@ function closeAllTabs() {
     openTabs = [];
     activeTab = null;
     $('editor-container').style.display = 'none';
+    if (xexInspectorContainer) xexInspectorContainer.style.display = 'none';
     $('welcome-screen').style.display = 'flex';
+    updateBreadcrumb();
     renderTabs();
-    saveWorkspaceState();
 }
 
 function renderTabs() {
@@ -804,6 +739,225 @@ function renderTabs() {
         });
         bar.appendChild(el);
     }
+}
+
+// ══════════════════════════════════════
+//  XEX INSPECTOR
+// ══════════════════════════════════════
+let xexInspectorContainer: HTMLElement | null = null;
+
+async function openXexInspector(xexPath?: string) {
+    try {
+        const data = await ipcRenderer.invoke(IPC.XEX_INSPECT, xexPath || undefined);
+        if (!data) return; // User cancelled
+        showXexInspector(data);
+    } catch (err: any) {
+        appendOutput(`XEX Inspector error: ${err.message}\n`);
+    }
+}
+
+function showXexInspector(data: any) {
+    // Create or reuse the inspector container
+    if (!xexInspectorContainer) {
+        xexInspectorContainer = document.createElement('div');
+        xexInspectorContainer.id = 'xex-inspector';
+        $('editor-area').appendChild(xexInspectorContainer);
+    }
+
+    // Add as a pseudo-tab
+    const tabPath = `__xex_inspector__:${data.filePath || 'xex'}`;
+    const existing = openTabs.find(t => t.path === tabPath);
+    if (existing) {
+        switchToXexTab(tabPath, data);
+        return;
+    }
+
+    // Create a dummy model (won't be used by Monaco)
+    const monaco = (window as any).monaco;
+    const model = monaco?.editor?.createModel?.('', 'plaintext') || { dispose: () => {}, getValue: () => '' };
+
+    openTabs.push({ path: tabPath, name: `🔍 ${data.fileName || 'XEX Inspector'}`, model, modified: false });
+    switchToXexTab(tabPath, data);
+}
+
+function switchToXexTab(tabPath: string, data: any) {
+    activeTab = tabPath;
+    // Hide Monaco editor, show XEX inspector
+    $('editor-container').style.display = 'none';
+    $('welcome-screen').style.display = 'none';
+    if (xexInspectorContainer) {
+        xexInspectorContainer.style.display = 'block';
+        xexInspectorContainer.innerHTML = renderXexInspectorHtml(data);
+        // Attach drag-drop handler
+        setupXexDropZone();
+    }
+    renderTabs();
+}
+
+function setupXexDropZone() {
+    const dropZone = document.getElementById('xex-drop-zone');
+    if (!dropZone) return;
+    dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('xex-drag-over'); });
+    dropZone.addEventListener('dragleave', () => dropZone.classList.remove('xex-drag-over'));
+    dropZone.addEventListener('drop', (e) => {
+        e.preventDefault();
+        dropZone.classList.remove('xex-drag-over');
+        const files = e.dataTransfer?.files;
+        if (files && files.length > 0) {
+            const file = files[0];
+            if (file.path) openXexInspector(file.path);
+        }
+    });
+}
+
+function renderXexInspectorHtml(data: any): string {
+    if (data.error && !data.valid) {
+        return `
+        <div class="xex-inspector-content">
+            <div class="xex-header-bar">
+                <h2>🔍 XEX Inspector</h2>
+                <span class="xex-file-path">${escHtml(data.filePath || '')}</span>
+            </div>
+            <div id="xex-drop-zone" class="xex-drop-zone">
+                <div class="xex-drop-icon">📦</div>
+                <div class="xex-drop-text">Drop a .xex file here to inspect</div>
+                <div class="xex-drop-hint">or use View → Inspect XEX...</div>
+            </div>
+            <div class="xex-error-box">⚠ ${escHtml(data.error)}</div>
+        </div>`;
+    }
+
+    let html = `<div class="xex-inspector-content">`;
+
+    // Header bar
+    html += `<div class="xex-header-bar">
+        <h2>🔍 XEX Inspector</h2>
+        <div id="xex-drop-zone" class="xex-drop-zone xex-drop-zone-mini">
+            <span>📦 Drop another .xex here</span>
+        </div>
+    </div>`;
+
+    // File overview
+    html += `<div class="xex-section">
+        <div class="xex-section-title">📄 File Overview</div>
+        <div class="xex-info-grid">
+            <div class="xex-info-row"><span class="xex-label">File</span><span class="xex-value">${escHtml(data.fileName)}</span></div>
+            <div class="xex-info-row"><span class="xex-label">Path</span><span class="xex-value xex-path">${escHtml(data.filePath)}</span></div>
+            <div class="xex-info-row"><span class="xex-label">Size</span><span class="xex-value">${escHtml(data.fileSizeFormatted)} (${data.fileSize?.toLocaleString()} bytes)</span></div>
+            <div class="xex-info-row"><span class="xex-label">Format</span><span class="xex-value xex-tag xex-tag-ok">${escHtml(data.header?.magic || '?')}</span></div>`;
+
+    if (data.header?.originalPeName) {
+        html += `<div class="xex-info-row"><span class="xex-label">Original PE</span><span class="xex-value">${escHtml(data.header.originalPeName)}</span></div>`;
+    }
+    if (data.header?.peTimestamp) {
+        html += `<div class="xex-info-row"><span class="xex-label">PE Timestamp</span><span class="xex-value">${escHtml(data.header.peTimestamp)}</span></div>`;
+    }
+    if (data.header?.moduleFlagsDecoded?.length > 0) {
+        html += `<div class="xex-info-row"><span class="xex-label">Module Flags</span><span class="xex-value">${data.header.moduleFlagsDecoded.map((f: string) => `<span class="xex-tag">${escHtml(f)}</span>`).join(' ')}</span></div>`;
+    }
+    html += `</div></div>`;
+
+    // Execution info
+    if (data.executionInfo && Object.keys(data.executionInfo).length > 0) {
+        html += `<div class="xex-section">
+            <div class="xex-section-title">⚡ Execution Info</div>
+            <div class="xex-info-grid">`;
+        if (data.executionInfo.titleId) html += `<div class="xex-info-row"><span class="xex-label">Title ID</span><span class="xex-value xex-mono">${escHtml(data.executionInfo.titleId)}</span></div>`;
+        if (data.executionInfo.mediaId) html += `<div class="xex-info-row"><span class="xex-label">Media ID</span><span class="xex-value xex-mono">${escHtml(data.executionInfo.mediaId)}</span></div>`;
+        if (data.executionInfo.version) html += `<div class="xex-info-row"><span class="xex-label">Version</span><span class="xex-value">${escHtml(data.executionInfo.version)}</span></div>`;
+        if (data.executionInfo.baseVersion) html += `<div class="xex-info-row"><span class="xex-label">Base Version</span><span class="xex-value">${escHtml(data.executionInfo.baseVersion)}</span></div>`;
+        if (data.executionInfo.entryPoint) html += `<div class="xex-info-row"><span class="xex-label">Entry Point</span><span class="xex-value xex-mono">${escHtml(data.executionInfo.entryPoint)}</span></div>`;
+        if (data.executionInfo.imageBaseAddress) html += `<div class="xex-info-row"><span class="xex-label">Image Base</span><span class="xex-value xex-mono">${escHtml(data.executionInfo.imageBaseAddress)}</span></div>`;
+        if (data.executionInfo.discNumber) html += `<div class="xex-info-row"><span class="xex-label">Disc</span><span class="xex-value">${data.executionInfo.discNumber} of ${data.executionInfo.discCount}</span></div>`;
+        html += `</div></div>`;
+    }
+
+    // Sections
+    if (data.sections?.length > 0) {
+        html += `<div class="xex-section">
+            <div class="xex-section-title">📦 PE Sections (${data.sections.length})</div>
+            <table class="xex-table">
+                <thead><tr><th>Name</th><th>Virtual Addr</th><th>Virtual Size</th><th>Raw Size</th><th>Characteristics</th></tr></thead>
+                <tbody>`;
+        for (const sec of data.sections) {
+            const chars = sec.characteristics?.join(', ') || '';
+            html += `<tr>
+                <td class="xex-mono">${escHtml(sec.name)}</td>
+                <td class="xex-mono">${escHtml(sec.virtualAddress)}</td>
+                <td>${escHtml(sec.virtualSizeFormatted)}</td>
+                <td>${escHtml(sec.rawDataSizeFormatted)}</td>
+                <td><span class="xex-chars">${escHtml(chars)}</span></td>
+            </tr>`;
+        }
+        html += `</tbody></table></div>`;
+    }
+
+    // Imports
+    if (data.imports?.length > 0) {
+        html += `<div class="xex-section">
+            <div class="xex-section-title">📥 Import Libraries (${data.imports.length})</div>
+            <div class="xex-imports-list">`;
+        for (const imp of data.imports) {
+            html += `<div class="xex-import-item"><span class="xex-mono">${escHtml(imp.library)}</span></div>`;
+        }
+        html += `</div></div>`;
+    }
+
+    // Resources
+    if (data.resources?.length > 0) {
+        html += `<div class="xex-section">
+            <div class="xex-section-title">🗂 Resources (${data.resources.length})</div>
+            <table class="xex-table">
+                <thead><tr><th>Name</th><th>Address</th><th>Size</th></tr></thead>
+                <tbody>`;
+        for (const res of data.resources) {
+            html += `<tr>
+                <td class="xex-mono">${escHtml(res.name)}</td>
+                <td class="xex-mono">${escHtml(res.address)}</td>
+                <td>${escHtml(res.sizeFormatted)}</td>
+            </tr>`;
+        }
+        html += `</tbody></table></div>`;
+    }
+
+    // Optional headers (collapsible raw view)
+    if (data.optionalHeaders?.length > 0) {
+        html += `<div class="xex-section">
+            <div class="xex-section-title xex-collapsible" onclick="this.parentElement.classList.toggle('xex-collapsed')">
+                ▶ Optional Headers (${data.optionalHeaders.length})
+            </div>
+            <table class="xex-table xex-collapsible-body">
+                <thead><tr><th>ID</th><th>Name</th><th>Data</th></tr></thead>
+                <tbody>`;
+        for (const h of data.optionalHeaders) {
+            const extra = h.value ? ` → ${typeof h.value === 'string' ? escHtml(h.value) : h.valueFormatted || h.value}` : '';
+            html += `<tr>
+                <td class="xex-mono">${escHtml(h.idHex)}</td>
+                <td>${escHtml(h.name)}</td>
+                <td class="xex-mono">${escHtml(h.dataHex)}${extra}</td>
+            </tr>`;
+        }
+        html += `</tbody></table></div>`;
+    }
+
+    // Security info
+    if (data.securityInfo?.imageSize) {
+        html += `<div class="xex-section">
+            <div class="xex-section-title">🔒 Security Info</div>
+            <div class="xex-info-grid">
+                <div class="xex-info-row"><span class="xex-label">Image Size</span><span class="xex-value">${escHtml(data.securityInfo.imageSizeFormatted)}</span></div>
+            </div>
+        </div>`;
+    }
+
+    html += `</div>`;
+    return html;
+}
+
+function escHtml(str: string): string {
+    const div = document.createElement('div');
+    div.textContent = str;
+    return div.innerHTML;
 }
 
 // ══════════════════════════════════════
@@ -835,28 +989,10 @@ async function saveAllFiles(silent = false) {
 // ══════════════════════════════════════
 //  FILE TREE
 // ══════════════════════════════════════
-// Hidden project files that are filtered unless showHiddenFiles is enabled
-const HIDDEN_PROJECT_FILES = new Set(['nexia.json', 'nexia-workspace.json']);
-
-function filterHiddenProjectFiles(nodes: any[]): any[] {
-    return nodes.filter(node => {
-        if (!node.isDirectory && HIDDEN_PROJECT_FILES.has(node.name)) return false;
-        if (node.isDirectory && node.children) {
-            node.children = filterHiddenProjectFiles(node.children);
-        }
-        return true;
-    });
-}
-
 async function refreshFileTree() {
-    let tree = await ipcRenderer.invoke(IPC.FILE_LIST);
+    const tree = await ipcRenderer.invoke(IPC.FILE_LIST);
     const container = $('file-tree');
     container.innerHTML = '';
-
-    // Filter hidden project files unless setting is enabled
-    if (!userSettings.showHiddenFiles) {
-        tree = filterHiddenProjectFiles(tree);
-    }
 
     if (!currentProject) {
         renderFileTree(tree, container, 0);
@@ -971,12 +1107,10 @@ function createVirtualFolder(name: string, icon: string, files: any[], depth: nu
     // Right-click on virtual folder
     header.addEventListener('contextmenu', (e: MouseEvent) => {
         e.preventDefault();
-        const isHeader = slug === 'header-files';
-        const fileContext = isHeader ? 'header' : 'source';
         showContextMenu(e.clientX, e.clientY, [
             { label: 'New File...', action: () => inlineCreateItem('file') },
             { label: '─', action: () => {} },
-            { label: 'Add Existing File...', action: () => addExistingFile(fileContext as any) },
+            { label: 'Add Existing File...', action: () => addExistingFile() },
         ]);
     });
 
@@ -1190,56 +1324,20 @@ async function newFolderInProject() {
     } catch (err: any) { appendOutput(`Create folder failed: ${err.message}\n`); }
 }
 
-async function addExistingFile(context: 'header' | 'source' | 'general' = 'general') {
+async function addExistingFile() {
     if (!currentProject) { appendOutput('Open a project first.\n'); return; }
-
-    // Build file type filters based on context
-    const HEADER_EXTS = ['h', 'hpp', 'hxx', 'inl'];
-    const SOURCE_EXTS = ['cpp', 'c', 'cc', 'cxx'];
-    const CODE_EXTS = [...SOURCE_EXTS, ...HEADER_EXTS];
-
-    let filters: { name: string; extensions: string[] }[];
-    let destDir: string;
-
-    if (context === 'header') {
-        filters = [
-            { name: 'Header Files', extensions: HEADER_EXTS },
-        ];
-        destDir = nodePath.join(currentProject.path, 'include');
-    } else if (context === 'source') {
-        filters = [
-            { name: 'Source Files', extensions: SOURCE_EXTS },
-        ];
-        destDir = nodePath.join(currentProject.path, 'src');
-    } else {
-        filters = [
-            { name: 'Code Files', extensions: CODE_EXTS },
-            { name: 'All Files', extensions: ['*'] },
-        ];
-        destDir = nodePath.join(currentProject.path, 'src');
-    }
-
-    const filePaths: string[] | null = await ipcRenderer.invoke('file:selectFiles', filters);
-    if (!filePaths || filePaths.length === 0) return;
-    if (!nodeFs.existsSync(destDir)) nodeFs.mkdirSync(destDir, { recursive: true });
-
-    let added = 0;
-    for (const filePath of filePaths) {
-        const fileName = nodePath.basename(filePath);
-        const dest = nodePath.join(destDir, fileName);
-        try {
-            nodeFs.copyFileSync(filePath, dest);
-            added++;
-        } catch (err: any) { appendOutput(`Add file failed (${fileName}): ${err.message}\n`); }
-    }
-
-    if (added > 0) {
+    const filePath = await ipcRenderer.invoke(IPC.FILE_SELECT_FILE);
+    if (!filePath) return;
+    const fileName = nodePath.basename(filePath);
+    const srcDir = nodePath.join(currentProject.path, 'src');
+    if (!nodeFs.existsSync(srcDir)) nodeFs.mkdirSync(srcDir, { recursive: true });
+    const dest = nodePath.join(srcDir, fileName);
+    try {
+        nodeFs.copyFileSync(filePath, dest);
         await refreshFileTree();
-        // Open the last added file
-        const lastFile = nodePath.join(destDir, nodePath.basename(filePaths[filePaths.length - 1]));
-        if (nodeFs.existsSync(lastFile)) openFile(lastFile);
-        appendOutput(`Added ${added} file${added > 1 ? 's' : ''}.\n`);
-    }
+        openFile(dest);
+        appendOutput(`Added: ${fileName}\n`);
+    } catch (err: any) { appendOutput(`Add file failed: ${err.message}\n`); }
 }
 
 function renderFileTree(nodes: any[], container: HTMLElement, depth: number, clear: boolean = true) {
@@ -1250,7 +1348,6 @@ function renderFileTree(nodes: any[], container: HTMLElement, depth: number, cle
             const header = document.createElement('div');
             header.className = 'tree-item';
             header.style.paddingLeft = (8 + depth * 16) + 'px';
-            header.setAttribute('data-dir-path', node.path);
             header.innerHTML = `<span class="tree-arrow">▶</span><span class="tree-icon">📁</span><span class="tree-name">${node.name}</span>`;
             const children = document.createElement('div');
             children.className = 'tree-children';
@@ -1264,7 +1361,6 @@ function renderFileTree(nodes: any[], container: HTMLElement, depth: number, cle
                 } else {
                     arrow.textContent = '▶'; arrow.classList.remove('expanded'); icon.textContent = '📁';
                 }
-                saveWorkspaceState();
             });
             header.addEventListener('contextmenu', (e: MouseEvent) => {
                 e.preventDefault();
@@ -1414,14 +1510,13 @@ const LINK_ERROR_RE = /^(.+?\.obj)\s*:\s*(error|warning)\s+(\w+)\s*:\s*(.*)$/;
 
 function appendOutput(text: string) {
     const el = $('output-text');
-    // Strip carriage returns from Windows-style line endings
-    const cleaned = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-    const lines = cleaned.split('\n');
+    const lines = text.split('\n');
     for (let i = 0; i < lines.length; i++) {
         const line = lines[i];
-        // Skip the trailing empty segment from split (the preceding line already has \n)
+        // Don't add trailing newline for last empty split segment
         if (i === lines.length - 1 && line === '') {
-            break;
+            el.appendChild(document.createTextNode('\n'));
+            continue;
         }
 
         const msvcMatch = line.match(MSVC_DIAG_RE);
@@ -1617,7 +1712,6 @@ function hasUnsavedChanges(): boolean {
 }
 
 function confirmUnsavedAndClose() {
-    flushWorkspaceState();
     if (hasUnsavedChanges()) {
         const choice = confirm('You have unsaved changes. Save all before closing?');
         if (choice) {
@@ -1627,11 +1721,6 @@ function confirmUnsavedAndClose() {
     }
     ipcRenderer.send(IPC.APP_CLOSE);
 }
-
-// Safety net: also flush workspace state if the window is being unloaded
-window.addEventListener('beforeunload', () => {
-    flushWorkspaceState();
-});
 
 // ══════════════════════════════════════
 //  BUILD
@@ -1673,51 +1762,6 @@ function setBuildStatus(state: 'ready' | 'building' | 'succeeded' | 'failed') {
     el.className = 'status-build-' + state;
 }
 
-// ── Project Properties Dialog ──
-function showProjectProperties() {
-    if (!currentProject) { appendOutput('No project open.\n'); return; }
-
-    // Populate controls from current project config
-    ($('pp-enable-rtti') as HTMLInputElement).checked = !!currentProject.enableRTTI;
-    ($('pp-exception-handling') as HTMLSelectElement).value = currentProject.exceptionHandling || 'EHsc';
-    ($('pp-warning-level') as HTMLSelectElement).value = String(currentProject.warningLevel ?? 3);
-    ($('pp-extra-cl-flags') as HTMLInputElement).value = currentProject.additionalCompilerFlags || '';
-    ($('pp-extra-link-flags') as HTMLInputElement).value = currentProject.additionalLinkerFlags || '';
-
-    $('project-props-overlay').classList.remove('hidden');
-}
-
-$('pp-cancel').addEventListener('click', () => {
-    $('project-props-overlay').classList.add('hidden');
-});
-
-$('pp-save').addEventListener('click', async () => {
-    if (!currentProject) return;
-
-    currentProject.enableRTTI = ($('pp-enable-rtti') as HTMLInputElement).checked;
-    currentProject.exceptionHandling = ($('pp-exception-handling') as HTMLSelectElement).value as any;
-    currentProject.warningLevel = parseInt(($('pp-warning-level') as HTMLSelectElement).value, 10) as any;
-    currentProject.additionalCompilerFlags = ($('pp-extra-cl-flags') as HTMLInputElement).value.trim();
-    currentProject.additionalLinkerFlags = ($('pp-extra-link-flags') as HTMLInputElement).value.trim();
-
-    // Persist to nexia.json
-    try {
-        await ipcRenderer.invoke(IPC.PROJECT_SAVE, currentProject);
-        appendOutput('Project properties saved.\n');
-    } catch (err: any) {
-        appendOutput(`Failed to save project properties: ${err.message}\n`);
-    }
-
-    $('project-props-overlay').classList.add('hidden');
-});
-
-// Close on overlay background click
-$('project-props-overlay').addEventListener('click', (e: MouseEvent) => {
-    if (e.target === $('project-props-overlay')) {
-        $('project-props-overlay').classList.add('hidden');
-    }
-});
-
 ipcRenderer.on(IPC.BUILD_OUTPUT, (_e: any, data: string) => appendOutput(data));
 ipcRenderer.on(IPC.TOOL_OUTPUT, (_e: any, data: string) => appendOutput(data));
 ipcRenderer.on(IPC.BUILD_COMPLETE, (_e: any, result: any) => {
@@ -1757,6 +1801,14 @@ ipcRenderer.on(IPC.BUILD_COMPLETE, (_e: any, result: any) => {
     }
     // Learning system hook
     onBuildComplete(result);
+    // AI error analysis hook
+    if (errCount > 0) {
+        analyzeAIBuildErrors(result.errors || [], result.warnings || []);
+    } else {
+        // Clear AI errors view
+        $('ai-errors-content').classList.add('hidden');
+        $('ai-errors-empty').classList.remove('hidden');
+    }
 });
 
 async function jumpToError(err: any) {
@@ -1787,28 +1839,14 @@ async function jumpToError(err: any) {
 async function openProject(dir?: string) {
     const project = await ipcRenderer.invoke(IPC.PROJECT_OPEN, dir);
     if (!project) return;
-
-    // Close any currently open tabs from a previous project
-    for (const tab of openTabs) tab.model.dispose();
-    openTabs = [];
-    activeTab = null;
-
     currentProject = project;
     $('titlebar-project').textContent = `— ${project.name}`;
     await refreshFileTree();
-
-    // Try to restore saved workspace state
-    const savedState = loadWorkspaceState();
-    if (savedState.openTabs.length > 0) {
-        await restoreWorkspaceState(savedState);
-    } else {
-        // No saved state: fall back to opening main source file
-        if (project.sourceFiles?.length > 0) {
-            const mainFile = project.sourceFiles.find((f: string) => /main\.(cpp|c)$/i.test(f))
-                          || project.sourceFiles[project.sourceFiles.length - 1];
-            const f = nodePath.isAbsolute(mainFile) ? mainFile : nodePath.join(project.path, mainFile);
-            openFile(f);
-        }
+    if (project.sourceFiles?.length > 0) {
+        const mainFile = project.sourceFiles.find((f: string) => /main\.(cpp|c)$/i.test(f))
+                      || project.sourceFiles[project.sourceFiles.length - 1];
+        const f = nodePath.isAbsolute(mainFile) ? mainFile : nodePath.join(project.path, mainFile);
+        openFile(f);
     }
     $('welcome-screen').style.display = 'none';
 }
@@ -2026,10 +2064,10 @@ async function renderExtensionsPanel() {
                         </div>
                     </div>
                     <div style="display:flex;gap:4px;margin-top:8px;justify-content:flex-end;">
-                        <button class="ext-toggle-btn devkit-btn" data-ext-id="${m.id}" data-enabled="${ext.enabled}" style="font-size:11px;padding:3px 8px;">
+                        <button class="ext-toggle-btn devkit-btn" data-ext-id="${m.id}" data-enabled="${ext.enabled}" class="btn-sm">
                             ${ext.enabled ? '⏸ Disable' : '▶ Enable'}
                         </button>
-                        <button class="ext-remove-btn devkit-btn" data-ext-id="${m.id}" style="font-size:11px;padding:3px 8px;color:#ff5555;">
+                        <button class="ext-remove-btn devkit-btn" data-ext-id="${m.id}" class="btn-sm btn-danger">
                             🗑
                         </button>
                     </div>
@@ -2143,7 +2181,6 @@ $('btn-extensions').addEventListener('click', () => {
 // ══════════════════════════════════════
 let devkitConnected = false;
 let devkitCurrentIp = '';
-let devkitCurrentBrowsePath = '';
 
 function initDevkitPanel() {
     $('devkit-panel').innerHTML = `
@@ -2173,12 +2210,6 @@ function initDevkitPanel() {
                 <button class="devkit-btn" id="devkit-path-go">Go</button>
             </div>
             <div id="devkit-file-list" class="devkit-file-list"></div>
-            <div id="devkit-drop-overlay" class="devkit-drop-overlay hidden">
-                <div class="devkit-drop-content">
-                    <span style="font-size:32px;">📦</span>
-                    <span>Drop files here to upload</span>
-                </div>
-            </div>
         </div>`;
 
     // Check if already connected
@@ -2307,90 +2338,6 @@ function initDevkitPanel() {
             if (p) browseDevkitPath(p);
         }
     });
-
-    // ── Drag & Drop file upload to devkit ──
-    const fileBrowser = $('devkit-file-browser');
-    const dropOverlay = $('devkit-drop-overlay');
-    let dragCounter = 0;
-
-    if (fileBrowser && dropOverlay) {
-        fileBrowser.addEventListener('dragenter', (e: DragEvent) => {
-            e.preventDefault();
-            e.stopPropagation();
-            if (!devkitConnected || !devkitCurrentBrowsePath) return;
-            dragCounter++;
-            dropOverlay.classList.remove('hidden');
-        });
-
-        fileBrowser.addEventListener('dragover', (e: DragEvent) => {
-            e.preventDefault();
-            e.stopPropagation();
-            if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
-        });
-
-        fileBrowser.addEventListener('dragleave', (e: DragEvent) => {
-            e.preventDefault();
-            e.stopPropagation();
-            dragCounter--;
-            if (dragCounter <= 0) {
-                dragCounter = 0;
-                dropOverlay.classList.add('hidden');
-            }
-        });
-
-        fileBrowser.addEventListener('drop', async (e: DragEvent) => {
-            e.preventDefault();
-            e.stopPropagation();
-            dragCounter = 0;
-            dropOverlay.classList.add('hidden');
-
-            if (!devkitConnected || !devkitCurrentBrowsePath) {
-                appendOutput('Cannot upload: not connected or no directory selected.\n');
-                return;
-            }
-
-            const files = e.dataTransfer?.files;
-            if (!files || files.length === 0) return;
-
-            const remoteDest = devkitCurrentBrowsePath;
-            const sep = remoteDest.endsWith('\\') || remoteDest.endsWith(':') ? '' : '\\';
-            const total = files.length;
-
-            appendOutput(`Uploading ${total} file${total > 1 ? 's' : ''} to ${remoteDest}...\n`);
-            showBottomPanel();
-
-            let succeeded = 0;
-            let failed = 0;
-
-            for (let i = 0; i < files.length; i++) {
-                const file = files[i];
-                const localPath = (file as any).path; // Electron adds .path to File objects
-                if (!localPath) {
-                    appendOutput(`  Skipped "${file.name}" (no local path)\n`);
-                    failed++;
-                    continue;
-                }
-                const remoteFilePath = remoteDest + sep + file.name;
-                appendOutput(`  [${i + 1}/${total}] ${file.name} -> ${remoteFilePath}\n`);
-
-                try {
-                    await ipcRenderer.invoke(IPC.DEVKIT_COPY_TO, localPath, remoteFilePath, devkitCurrentIp);
-                    appendOutput(`    ✓ Uploaded\n`);
-                    succeeded++;
-                } catch (err: any) {
-                    appendOutput(`    ✗ Failed: ${err.message}\n`);
-                    failed++;
-                }
-            }
-
-            appendOutput(`Upload complete: ${succeeded} succeeded, ${failed} failed.\n`);
-
-            // Refresh the current directory listing
-            if (devkitCurrentBrowsePath) {
-                browseDevkitPath(devkitCurrentBrowsePath);
-            }
-        });
-    }
 }
 
 function updateDevkitUI(connected: boolean, ip?: string, consoleName?: string) {
@@ -2439,7 +2386,6 @@ async function showDevkitVolumes() {
     if (!listEl) return;
 
     pathInput.value = '';
-    devkitCurrentBrowsePath = '';
     listEl.innerHTML = '<div class="community-feed-loading">Querying volumes...</div>';
 
     let volumes: string[];
@@ -2473,7 +2419,6 @@ async function browseDevkitPath(remotePath: string) {
     const pathInput = $('devkit-path') as HTMLInputElement;
     if (!listEl) return;
 
-    devkitCurrentBrowsePath = remotePath;
     pathInput.value = remotePath;
     listEl.innerHTML = '<div class="community-feed-loading">Loading...</div>';
 
@@ -3045,7 +2990,6 @@ function showSettingsPanel() {
     });
     ($('setting-font-size') as HTMLInputElement).value = String(userSettings.fontSize);
     ($('setting-fancy-effects') as HTMLInputElement).checked = userSettings.fancyEffects;
-    ($('setting-show-hidden-files') as HTMLInputElement).checked = userSettings.showHiddenFiles;
     $('settings-overlay').classList.remove('hidden');
 }
 
@@ -3088,7 +3032,7 @@ document.addEventListener('click', (e) => {
             saveUserSettings();
             applyThemeColors();
             applyFancyMode();
-            if (editor) editor.updateOptions({ fontSize: userSettings.fontSize });
+            if (editor) editor.updateOptions({ fontSize: 14 });
             $('status-zoom').textContent = '100%';
             userProfile = { ...DEFAULT_PROFILE };
             saveProfile();
@@ -3125,21 +3069,16 @@ document.addEventListener('change', (e) => {
         applyFancyMode();
         saveUserSettings();
     }
-    if (target.id === 'setting-show-hidden-files') {
-        userSettings.showHiddenFiles = target.checked;
-        saveUserSettings();
-        refreshFileTree();
-    }
 });
 
 // Theme presets
 const PRESETS: Record<string, Partial<UserSettings>> = {
-    xbox:   { accentColor: '#00e676', bgDark: '#0d0d1a', bgMain: '#1a1a2e', bgPanel: '#16213e', bgSidebar: '#0f1526', editorBg: '#1a1a2e', textColor: '#e0e0e0', textDim: '#8888aa' },
-    red:    { accentColor: '#ff5252', bgDark: '#1a0a0a', bgMain: '#2e1a1a', bgPanel: '#3e1616', bgSidebar: '#26100f', editorBg: '#2e1a1a', textColor: '#e0d0d0', textDim: '#aa7777' },
-    blue:   { accentColor: '#448aff', bgDark: '#0a0d1a', bgMain: '#1a202e', bgPanel: '#16243e', bgSidebar: '#0f1526', editorBg: '#1a202e', textColor: '#dce0e8', textDim: '#7788aa' },
-    purple: { accentColor: '#b388ff', bgDark: '#120d1a', bgMain: '#241a2e', bgPanel: '#2e163e', bgSidebar: '#1a0f26', editorBg: '#241a2e', textColor: '#e0dce8', textDim: '#9988aa' },
-    orange: { accentColor: '#ffab40', bgDark: '#1a130a', bgMain: '#2e241a', bgPanel: '#3e2e16', bgSidebar: '#261e0f', editorBg: '#2e241a', textColor: '#e8e0d0', textDim: '#aa9977' },
-    mono:   { accentColor: '#cccccc', bgDark: '#111111', bgMain: '#1c1c1c', bgPanel: '#252525', bgSidebar: '#181818', editorBg: '#1c1c1c', textColor: '#d4d4d4', textDim: '#888888' },
+    xbox:   { accentColor: '#4ec9b0', bgDark: '#181818', bgMain: '#1e1e1e', bgPanel: '#1e1e1e', bgSidebar: '#252526', editorBg: '#1e1e1e', textColor: '#cccccc', textDim: '#858585' },
+    red:    { accentColor: '#f14c4c', bgDark: '#1c1616', bgMain: '#221a1a', bgPanel: '#221a1a', bgSidebar: '#2a2020', editorBg: '#221a1a', textColor: '#d4c8c8', textDim: '#8a7070' },
+    blue:   { accentColor: '#4fc1ff', bgDark: '#16181c', bgMain: '#1a1e24', bgPanel: '#1a1e24', bgSidebar: '#20242a', editorBg: '#1a1e24', textColor: '#ccd0d8', textDim: '#6878889' },
+    purple: { accentColor: '#c586c0', bgDark: '#1c1620', bgMain: '#221a26', bgPanel: '#221a26', bgSidebar: '#28202e', editorBg: '#221a26', textColor: '#d4ccd8', textDim: '#8a7090' },
+    orange: { accentColor: '#ce9178', bgDark: '#1c1816', bgMain: '#241e1a', bgPanel: '#241e1a', bgSidebar: '#2a2420', editorBg: '#241e1a', textColor: '#d8d0c8', textDim: '#8a7868' },
+    mono:   { accentColor: '#cccccc', bgDark: '#141414', bgMain: '#1a1a1a', bgPanel: '#1a1a1a', bgSidebar: '#222222', editorBg: '#1a1a1a', textColor: '#d4d4d4', textDim: '#808080' },
 };
 
 document.addEventListener('click', (e) => {
@@ -3992,275 +3931,6 @@ async function pollFeed() {
     } catch {}
 }
 
-// ══════════════════════════════════════
-//  TUTORIALS PANEL
-// ══════════════════════════════════════
-interface TutorialVideo {
-    id: string;
-    title: string;
-    description: string;
-    duration?: string;
-    userAdded?: boolean;
-}
-
-const DEFAULT_TUTORIAL_VIDEOS: TutorialVideo[] = [];
-
-let tutorialVideos: TutorialVideo[] = [...DEFAULT_TUTORIAL_VIDEOS];
-let currentPlayingVideoId: string | null = null;
-
-function getTutorialStoragePath(): string | null {
-    const settingsDir = process.env.APPDATA || process.env.HOME || '';
-    if (!settingsDir) return null;
-    return nodePath.join(settingsDir, 'Nexia IDE', 'tutorials.json');
-}
-
-function loadTutorialVideos() {
-    const storagePath = getTutorialStoragePath();
-    if (!storagePath) return;
-    try {
-        if (nodeFs.existsSync(storagePath)) {
-            const saved = JSON.parse(nodeFs.readFileSync(storagePath, 'utf-8'));
-            if (Array.isArray(saved)) tutorialVideos = saved;
-        }
-    } catch {}
-}
-
-function saveTutorialVideos() {
-    const storagePath = getTutorialStoragePath();
-    if (!storagePath) return;
-    try {
-        const dir = nodePath.dirname(storagePath);
-        if (!nodeFs.existsSync(dir)) nodeFs.mkdirSync(dir, { recursive: true });
-        nodeFs.writeFileSync(storagePath, JSON.stringify(tutorialVideos, null, 2), 'utf-8');
-    } catch {}
-}
-
-function parseYouTubeId(input: string): string | null {
-    input = input.trim();
-    // Direct ID (11 chars)
-    if (/^[a-zA-Z0-9_-]{11}$/.test(input)) return input;
-    // Full URL patterns
-    const patterns = [
-        /(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/|youtube\.com\/v\/|youtube\.com\/shorts\/)([a-zA-Z0-9_-]{11})/,
-    ];
-    for (const re of patterns) {
-        const m = input.match(re);
-        if (m) return m[1];
-    }
-    return null;
-}
-
-function renderTutorialsPanel() {
-    const panel = $('tutorials-panel');
-    if (!panel) return;
-
-    loadTutorialVideos();
-
-    let html = `
-        <div style="padding:8px 12px;">
-            <div style="display:flex; gap:6px; margin-bottom:12px;">
-                <input type="text" id="tutorial-url-input" placeholder="Paste YouTube URL or video ID..."
-                    style="flex:1; background:var(--bg-dark); color:var(--text); border:1px solid rgba(255,255,255,0.1);
-                    border-radius:4px; padding:5px 8px; font-size:11px; font-family:var(--mono);">
-                <button id="tutorial-add-btn" class="setup-btn-primary" style="font-size:11px; padding:4px 12px; white-space:nowrap;">
-                    + Add Video
-                </button>
-            </div>
-    `;
-
-    // Video player area (hidden until a video is selected)
-    html += `
-        <div id="tutorial-player" style="display:none; margin-bottom:12px; border-radius:6px; overflow:hidden;
-            border:1px solid rgba(255,255,255,0.06); background:#000;">
-            <div style="position:relative; width:100%; padding-top:56.25%;">
-                <iframe id="tutorial-iframe" style="position:absolute;top:0;left:0;width:100%;height:100%;border:none;"
-                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-                    allowfullscreen></iframe>
-            </div>
-            <div id="tutorial-player-title" style="padding:6px 10px; font-size:11px; color:var(--text-dim); display:flex; justify-content:space-between; align-items:center;">
-                <span id="tutorial-player-name"></span>
-                <button id="tutorial-player-close" style="background:none; border:none; color:var(--text-dim); cursor:pointer; font-size:14px; padding:2px 6px;" title="Close player">✕</button>
-            </div>
-        </div>
-    `;
-
-    if (tutorialVideos.length === 0) {
-        html += `
-            <div style="text-align:center; padding:20px 10px; color:var(--text-dim);">
-                <p style="font-size:12px; margin:0 0 6px 0;">No videos added yet.</p>
-                <p style="font-size:10px; margin:0; line-height:1.5;">Paste a YouTube URL above to add tutorials,<br>walkthroughs, or any reference videos.</p>
-            </div>
-        `;
-    } else {
-        for (let i = 0; i < tutorialVideos.length; i++) {
-            const video = tutorialVideos[i];
-            const thumbUrl = `https://img.youtube.com/vi/${video.id}/mqdefault.jpg`;
-            const isPlaying = currentPlayingVideoId === video.id;
-            html += `
-                <div class="tutorial-card${isPlaying ? ' playing' : ''}" data-video-index="${i}" data-video-id="${video.id}" style="
-                    margin-bottom:8px; border-radius:6px; overflow:hidden;
-                    background:var(--bg-panel); border:1px solid ${isPlaying ? 'var(--green)' : 'rgba(255,255,255,0.06)'};
-                    cursor:pointer; transition:border-color 0.2s; position:relative;
-                ">
-                    <div style="display:flex; align-items:center; gap:8px; padding:6px 8px;">
-                        <div style="position:relative; width:80px; min-width:80px; height:45px; border-radius:4px; overflow:hidden; background:#000;">
-                            <img src="${thumbUrl}" style="width:100%;height:100%;object-fit:cover;"
-                                 onerror="this.style.display='none'">
-                            <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
-                                width:22px;height:22px;border-radius:50%;background:rgba(255,0,0,0.85);
-                                display:flex;align-items:center;justify-content:center;">
-                                <div style="width:0;height:0;border-left:8px solid #fff;border-top:5px solid transparent;border-bottom:5px solid transparent;margin-left:2px;"></div>
-                            </div>
-                            ${video.duration ? `<span style="position:absolute;bottom:2px;right:2px;background:rgba(0,0,0,0.8);color:#fff;font-size:8px;padding:0px 3px;border-radius:2px;">${video.duration}</span>` : ''}
-                        </div>
-                        <div style="flex:1; min-width:0;">
-                            <div style="font-size:11px;font-weight:600;color:var(--text);line-height:1.3;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(video.title)}</div>
-                            <div style="font-size:9px;color:var(--text-dim);line-height:1.4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(video.description)}</div>
-                        </div>
-                        <button class="tutorial-remove-btn" data-remove-index="${i}" title="Remove"
-                            style="background:none;border:none;color:var(--text-dim);cursor:pointer;font-size:12px;padding:4px;opacity:0.5;flex-shrink:0;"
-                            >✕</button>
-                    </div>
-                </div>
-            `;
-        }
-    }
-
-    html += `</div>`;
-    panel.innerHTML = html;
-
-    // ── Event handlers ──
-
-    // Add video
-    const addBtn = $('tutorial-add-btn');
-    const urlInput = $('tutorial-url-input') as HTMLInputElement;
-
-    addBtn?.addEventListener('click', () => addTutorialFromInput());
-    urlInput?.addEventListener('keydown', (e: KeyboardEvent) => {
-        if (e.key === 'Enter') addTutorialFromInput();
-    });
-
-    // Play video on card click
-    panel.querySelectorAll('.tutorial-card').forEach((card: Element) => {
-        card.addEventListener('click', (e: Event) => {
-            // Don't play if clicking remove button
-            if ((e.target as HTMLElement).closest('.tutorial-remove-btn')) return;
-            const videoId = (card as HTMLElement).dataset.videoId;
-            if (videoId) playTutorialVideo(videoId);
-        });
-        (card as HTMLElement).addEventListener('mouseenter', () => {
-            if (!(card as HTMLElement).classList.contains('playing')) {
-                (card as HTMLElement).style.borderColor = 'var(--green)';
-            }
-        });
-        (card as HTMLElement).addEventListener('mouseleave', () => {
-            if (!(card as HTMLElement).classList.contains('playing')) {
-                (card as HTMLElement).style.borderColor = 'rgba(255,255,255,0.06)';
-            }
-        });
-    });
-
-    // Remove video buttons
-    panel.querySelectorAll('.tutorial-remove-btn').forEach((btn: Element) => {
-        btn.addEventListener('click', (e: Event) => {
-            e.stopPropagation();
-            const idx = parseInt((btn as HTMLElement).dataset.removeIndex || '-1', 10);
-            if (idx >= 0 && idx < tutorialVideos.length) {
-                const removed = tutorialVideos[idx];
-                if (removed.id === currentPlayingVideoId) {
-                    currentPlayingVideoId = null;
-                }
-                tutorialVideos.splice(idx, 1);
-                saveTutorialVideos();
-                renderTutorialsPanel();
-            }
-        });
-    });
-
-    // Close player
-    $('tutorial-player-close')?.addEventListener('click', () => {
-        currentPlayingVideoId = null;
-        const player = $('tutorial-player');
-        const iframe = $('tutorial-iframe') as HTMLIFrameElement;
-        if (player) player.style.display = 'none';
-        if (iframe) iframe.src = '';
-        // Remove playing state from cards
-        panel.querySelectorAll('.tutorial-card.playing').forEach(c => {
-            (c as HTMLElement).classList.remove('playing');
-            (c as HTMLElement).style.borderColor = 'rgba(255,255,255,0.06)';
-        });
-    });
-
-    // Restore player if a video was playing
-    if (currentPlayingVideoId) {
-        playTutorialVideo(currentPlayingVideoId, false);
-    }
-}
-
-function addTutorialFromInput() {
-    const urlInput = $('tutorial-url-input') as HTMLInputElement;
-    if (!urlInput) return;
-    const raw = urlInput.value.trim();
-    if (!raw) return;
-
-    const videoId = parseYouTubeId(raw);
-    if (!videoId) {
-        appendOutput('Invalid YouTube URL or video ID.\n');
-        return;
-    }
-
-    // Check for duplicates
-    if (tutorialVideos.some(v => v.id === videoId)) {
-        appendOutput('Video already in list.\n');
-        urlInput.value = '';
-        return;
-    }
-
-    // Add with a default title — user can see the thumbnail to identify it
-    tutorialVideos.push({
-        id: videoId,
-        title: `YouTube Video (${videoId})`,
-        description: raw.length > 50 ? raw.substring(0, 50) + '...' : raw,
-        userAdded: true,
-    });
-    saveTutorialVideos();
-    urlInput.value = '';
-    renderTutorialsPanel();
-
-    // Auto-play the newly added video
-    playTutorialVideo(videoId);
-}
-
-function playTutorialVideo(videoId: string, autoplay = true) {
-    currentPlayingVideoId = videoId;
-    const player = $('tutorial-player');
-    const iframe = $('tutorial-iframe') as HTMLIFrameElement;
-    const nameEl = $('tutorial-player-name');
-
-    if (!player || !iframe) return;
-
-    iframe.src = `https://www.youtube-nocookie.com/embed/${videoId}${autoplay ? '?autoplay=1' : ''}`;
-    player.style.display = 'block';
-
-    const video = tutorialVideos.find(v => v.id === videoId);
-    if (nameEl) nameEl.textContent = video?.title || videoId;
-
-    // Update card highlight
-    const panel = $('tutorials-panel');
-    if (panel) {
-        panel.querySelectorAll('.tutorial-card').forEach(c => {
-            const id = (c as HTMLElement).dataset.videoId;
-            if (id === videoId) {
-                (c as HTMLElement).classList.add('playing');
-                (c as HTMLElement).style.borderColor = 'var(--green)';
-            } else {
-                (c as HTMLElement).classList.remove('playing');
-                (c as HTMLElement).style.borderColor = 'rgba(255,255,255,0.06)';
-            }
-        });
-    }
-}
-
 function renderCommunityPanel() {
     const panel = $('community-panel');
     if (!panel) return;
@@ -4853,12 +4523,12 @@ async function exportProject() {
         // Fallback: use a simple zip via child_process
     } catch {}
     // Use IPC to call main process for zipping
-    const result = await ipcRenderer.invoke('project:export');
+    const result = await ipcRenderer.invoke(IPC.PROJECT_EXPORT);
     if (result) appendOutput(`📦 Project exported to: ${result}\n`);
 }
 
 async function importProject() {
-    const result = await ipcRenderer.invoke('project:import');
+    const result = await ipcRenderer.invoke(IPC.PROJECT_IMPORT);
     if (result) {
         appendOutput(`📦 Project imported: ${result}\n`);
         openProject(result);
@@ -5179,92 +4849,6 @@ $('search-query').addEventListener('keydown', (e: KeyboardEvent) => {
 $('search-show-replace').addEventListener('change', () => {
     const show = ($('search-show-replace') as HTMLInputElement).checked;
     $('search-replace').classList.toggle('hidden', !show);
-    const actions = $('replace-actions');
-    if (show) {
-        actions.classList.remove('hidden');
-        actions.style.display = 'flex';
-    } else {
-        actions.classList.add('hidden');
-        actions.style.display = 'none';
-    }
-});
-
-// Replace All in files
-$('btn-replace-all').addEventListener('click', () => {
-    const query = ($('search-query') as HTMLInputElement).value;
-    const replacement = ($('search-replace') as HTMLInputElement).value;
-    const caseSensitive = ($('search-case') as HTMLInputElement).checked;
-    const useRegex = ($('search-regex') as HTMLInputElement).checked;
-    const include = ($('search-include') as HTMLInputElement).value;
-
-    if (!query || !currentProject) return;
-
-    const results = searchInFiles(query, caseSensitive, useRegex, include);
-    if (results.length === 0) {
-        appendOutput('Replace: No matches found.\n');
-        return;
-    }
-
-    // Group by file
-    const fileGroups = new Map<string, SearchMatch[]>();
-    for (const r of results) {
-        const arr = fileGroups.get(r.file) || [];
-        arr.push(r);
-        fileGroups.set(r.file, arr);
-    }
-
-    const fileCount = fileGroups.size;
-    const matchCount = results.length;
-    const confirmMsg = `Replace ${matchCount} occurrence${matchCount > 1 ? 's' : ''} across ${fileCount} file${fileCount > 1 ? 's' : ''}?`;
-    if (!confirm(confirmMsg)) return;
-
-    let re: RegExp;
-    try {
-        const flags = caseSensitive ? 'g' : 'gi';
-        re = useRegex ? new RegExp(query, flags) : new RegExp(escapeRegExp(query), flags);
-    } catch { return; }
-
-    let replacedFiles = 0;
-    let totalReplacements = 0;
-
-    for (const [file] of fileGroups) {
-        try {
-            const content = nodeFs.readFileSync(file, 'utf-8');
-            const newContent = content.replace(re, replacement);
-            if (newContent !== content) {
-                nodeFs.writeFileSync(file, newContent, 'utf-8');
-                replacedFiles++;
-                // Count replacements in this file
-                re.lastIndex = 0;
-                let count = 0;
-                const lines = content.split('\n');
-                for (const line of lines) {
-                    re.lastIndex = 0;
-                    let m;
-                    while ((m = re.exec(line)) !== null) {
-                        count++;
-                        if (!re.global) break;
-                        if (m[0].length === 0) re.lastIndex++;
-                    }
-                }
-                totalReplacements += count;
-
-                // Update any open tab model for this file
-                const openTab = openTabs.find(t => t.path === file);
-                if (openTab) {
-                    openTab.model.setValue(newContent);
-                    openTab.modified = false;
-                }
-            }
-        } catch (err: any) {
-            appendOutput(`Replace failed in ${nodePath.basename(file)}: ${err.message}\n`);
-        }
-    }
-
-    appendOutput(`Replaced ${totalReplacements} occurrence${totalReplacements > 1 ? 's' : ''} in ${replacedFiles} file${replacedFiles > 1 ? 's' : ''}.\n`);
-
-    // Re-run search to update results
-    triggerSearch();
 });
 
 function openFindInFiles() {
@@ -5280,6 +4864,34 @@ function openFindInFiles() {
         input.select();
     }, 50);
 }
+
+// ══════════════════════════════════════
+//  EDITOR ZOOM — Ctrl+Scroll, Ctrl+Plus/Minus, Ctrl+0
+// ══════════════════════════════════════
+
+function editorZoom(delta: number) {
+    if (!editor) return;
+    userSettings.fontSize = Math.max(8, Math.min(40, userSettings.fontSize + delta));
+    editor.updateOptions({ fontSize: userSettings.fontSize });
+    $('status-zoom').textContent = `${Math.round((userSettings.fontSize / 14) * 100)}%`;
+    saveUserSettings();
+}
+
+function editorZoomReset() {
+    if (!editor) return;
+    userSettings.fontSize = 14;
+    editor.updateOptions({ fontSize: 14 });
+    $('status-zoom').textContent = '100%';
+    saveUserSettings();
+}
+
+// Ctrl+Scroll over editor area
+$('editor-container').addEventListener('wheel', (e: WheelEvent) => {
+    if (!e.ctrlKey) return;
+    e.preventDefault();
+    e.stopPropagation();
+    editorZoom(e.deltaY < 0 ? 1 : -1);
+}, { passive: false });
 
 // ══════════════════════════════════════
 //  KEYBOARD SHORTCUTS
@@ -5318,24 +4930,15 @@ document.addEventListener('keydown', (e) => {
     // Zoom: Ctrl+= / Ctrl+- / Ctrl+0
     if (e.ctrlKey && (e.key === '=' || e.key === '+')) {
         e.preventDefault();
-        userSettings.fontSize = Math.min(40, userSettings.fontSize + 1);
-        if (editor) editor.updateOptions({ fontSize: userSettings.fontSize });
-        $('status-zoom').textContent = `${Math.round((userSettings.fontSize / 14) * 100)}%`;
-        saveUserSettings();
+        editorZoom(1);
     }
     if (e.ctrlKey && e.key === '-') {
         e.preventDefault();
-        userSettings.fontSize = Math.max(8, userSettings.fontSize - 1);
-        if (editor) editor.updateOptions({ fontSize: userSettings.fontSize });
-        $('status-zoom').textContent = `${Math.round((userSettings.fontSize / 14) * 100)}%`;
-        saveUserSettings();
+        editorZoom(-1);
     }
     if (e.ctrlKey && e.key === '0') {
         e.preventDefault();
-        userSettings.fontSize = 14;
-        if (editor) editor.updateOptions({ fontSize: 14 });
-        $('status-zoom').textContent = '100%';
-        saveUserSettings();
+        editorZoomReset();
     }
     if (e.key === 'Escape') { $$('.overlay').forEach(o => o.classList.add('hidden')); closeAllMenus(); }
 });
@@ -5374,6 +4977,1511 @@ function renderRecentProjects(recent: string[]) {
 // ══════════════════════════════════════
 //  INIT
 // ══════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════
+// NEXIA AI — Multi-provider AI assistant
+// ══════════════════════════════════════════════════════════════════════
+
+const XBOX360_SYSTEM_PROMPT = `You are Nexia AI, an expert Xbox 360 development assistant built into the Nexia IDE. You have deep knowledge of:
+- Xbox 360 SDK (XDK) APIs, D3D9 on Xbox 360, XAudio2, XACT, XInput
+- PowerPC architecture (Xenon CPU), Xbox 360 GPU (Xenos/ATI)
+- XEX format, XAM.XEX system functions, Xbox 360 memory layout
+- C++ game programming, HLSL shaders, Xbox 360 performance optimization
+- RGH/JTAG development, homebrew development, devkit deployment
+- MSBuild for Xbox 360 projects, Xbox 360 SDK toolchain
+
+When generating code, always use Xbox 360 compatible APIs and patterns.
+Keep responses concise and code-focused. Use C++ unless asked otherwise.`;
+
+interface AIMessage {
+    role: 'user' | 'assistant' | 'system';
+    content: string;
+    timestamp: number;
+}
+
+let aiMessages: AIMessage[] = [];
+let aiStreaming = false;
+
+// ── AI networking via Node's https (bypasses CSP, uses exact URLs) ──
+const nodeHttps = require('https');
+const nodeHttp = require('http');
+const nodeUrl = require('url');
+const { marked } = require('marked');
+const hljs = require('highlight.js');
+
+// Configure marked with highlight.js for syntax highlighting in code blocks
+marked.setOptions({
+    highlight: (code: string, lang: string) => {
+        if (lang && hljs.getLanguage(lang)) {
+            try { return hljs.highlight(code, { language: lang }).value; } catch {}
+        }
+        try { return hljs.highlightAuto(code).value; } catch {}
+        return code;
+    },
+    breaks: true,
+    gfm: true,
+});
+
+function renderMarkdown(text: string): string {
+    try { return marked.parse(text); }
+    catch { return text.replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>'); }
+}
+
+// Non-streaming request (error analysis, code gen, inline, test)
+function aiRequest(url: string, body: any, apiKey?: string): Promise<any> {
+    return new Promise((resolve, reject) => {
+        const parsed = new URL(url);
+        const isHttps = parsed.protocol === 'https:';
+        const lib = isHttps ? nodeHttps : nodeHttp;
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+        if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+        const postData = JSON.stringify(body);
+        headers['Content-Length'] = Buffer.byteLength(postData).toString();
+        const req = lib.request({
+            hostname: parsed.hostname, port: parsed.port || (isHttps ? 443 : 80),
+            path: parsed.pathname + parsed.search, method: 'POST', headers,
+        }, (res: any) => {
+            let data = '';
+            res.on('data', (chunk: string) => data += chunk);
+            res.on('end', () => {
+                if (res.statusCode >= 400) { reject(new Error(`HTTP ${res.statusCode}: ${data.substring(0, 300)}`)); return; }
+                try { resolve(JSON.parse(data)); }
+                catch { reject(new Error('Invalid JSON response: ' + data.substring(0, 200))); }
+            });
+        });
+        req.on('error', reject);
+        req.setTimeout(120000, () => { req.destroy(); reject(new Error('Request timeout')); });
+        req.write(postData); req.end();
+    });
+}
+
+function aiRequestRaw(url: string, body: any, headers: Record<string, string>): Promise<any> {
+    return new Promise((resolve, reject) => {
+        const parsed = new URL(url);
+        const isHttps = parsed.protocol === 'https:';
+        const lib = isHttps ? nodeHttps : nodeHttp;
+        const postData = JSON.stringify(body);
+        headers['Content-Length'] = Buffer.byteLength(postData).toString();
+        const req = lib.request({
+            hostname: parsed.hostname, port: parsed.port || (isHttps ? 443 : 80),
+            path: parsed.pathname + parsed.search, method: 'POST', headers,
+        }, (res: any) => {
+            let data = '';
+            res.on('data', (chunk: string) => data += chunk);
+            res.on('end', () => {
+                if (res.statusCode >= 400) { reject(new Error(`HTTP ${res.statusCode}: ${data.substring(0, 300)}`)); return; }
+                try { resolve(JSON.parse(data)); }
+                catch { reject(new Error('Invalid JSON response: ' + data.substring(0, 200))); }
+            });
+        });
+        req.on('error', reject);
+        req.setTimeout(120000, () => { req.destroy(); reject(new Error('Request timeout')); });
+        req.write(postData); req.end();
+    });
+}
+
+// ── SSE Streaming — parses Server-Sent Events, yields tokens to callback ──
+function aiStreamSSE(
+    url: string, body: any, headers: Record<string, string>,
+    onToken: (token: string) => void,
+    onDone: (fullText: string) => void,
+    onError: (err: Error) => void,
+): () => void {
+    const parsed = new URL(url);
+    const isHttps = parsed.protocol === 'https:';
+    const lib = isHttps ? nodeHttps : nodeHttp;
+
+    body.stream = true;
+    const postData = JSON.stringify(body);
+    headers['Content-Length'] = Buffer.byteLength(postData).toString();
+    headers['Accept'] = 'text/event-stream';
+
+    let fullText = '';
+    let aborted = false;
+    let buffer = '';
+    let finished = false;
+
+    const finish = () => { if (!finished) { finished = true; onDone(fullText); } };
+
+    const req = lib.request({
+        hostname: parsed.hostname, port: parsed.port || (isHttps ? 443 : 80),
+        path: parsed.pathname + parsed.search, method: 'POST', headers,
+    }, (res: any) => {
+        if (res.statusCode >= 400) {
+            let errData = '';
+            res.on('data', (c: string) => errData += c);
+            res.on('end', () => onError(new Error(`HTTP ${res.statusCode}: ${errData.substring(0, 300)}`)));
+            return;
+        }
+        res.setEncoding('utf8');
+        res.on('data', (chunk: string) => {
+            if (aborted) return;
+            buffer += chunk;
+            const lines = buffer.split('\n');
+            buffer = lines.pop() || '';
+            for (const line of lines) {
+                const trimmed = line.trim();
+                if (!trimmed || trimmed.startsWith(':')) continue;
+                if (trimmed === 'data: [DONE]') { finish(); return; }
+                if (trimmed.startsWith('data: ')) {
+                    try {
+                        const obj = JSON.parse(trimmed.slice(6));
+                        const delta = obj.choices?.[0]?.delta?.content || obj.choices?.[0]?.text || '';
+                        if (delta) { fullText += delta; onToken(delta); }
+                    } catch {}
+                }
+            }
+        });
+        res.on('end', () => { if (!aborted) finish(); });
+    });
+
+    req.on('error', (err: Error) => { if (!aborted) onError(err); });
+    req.setTimeout(120000, () => { req.destroy(); if (!aborted) onError(new Error('Stream timeout')); });
+    req.write(postData); req.end();
+
+    return () => { aborted = true; finished = true; req.destroy(); };
+}
+
+function getAIRequestURL(): string {
+    const s = userSettings;
+    switch (s.aiProvider) {
+        case 'anthropic': return 'https://api.anthropic.com/v1/messages';
+        case 'openai': return 'https://api.openai.com/v1/chat/completions';
+        case 'local': return s.aiEndpoint || 'http://localhost:11434/v1/chat/completions';
+        case 'custom': return s.aiEndpoint || 'http://localhost:8080/v1/chat/completions';
+        default: return s.aiEndpoint;
+    }
+}
+
+function getAIModel(): string {
+    const m = (userSettings.aiModel || '').trim();
+    if (m && m !== 'auto') return m;
+    const defaults: Record<string, string> = {
+        anthropic: 'claude-sonnet-4-20250514',
+        openai: 'gpt-4o',
+        local: 'llama3',
+        custom: '',
+    };
+    return defaults[userSettings.aiProvider] || '';
+}
+
+// ── Project Signature Scanner ──
+// Scans .h/.hpp/.cpp files for function, class, struct, enum, typedef, and #define signatures
+// to provide the LLM with codebase context for accurate completions
+
+let projectSignaturesCache: string = '';
+let projectSignaturesCacheTime: number = 0;
+const SIGNATURE_CACHE_TTL = 30000; // 30s — rescan after this
+
+function scanProjectSignatures(): string {
+    if (!currentProject?.path) return '';
+
+    // Use cache if fresh
+    const now = Date.now();
+    if (projectSignaturesCache && (now - projectSignaturesCacheTime) < SIGNATURE_CACHE_TTL) {
+        return projectSignaturesCache;
+    }
+
+    const srcDir = nodePath.join(currentProject.path, 'src');
+    const includeDir = nodePath.join(currentProject.path, 'include');
+    const signatures: string[] = [];
+    const scannedFiles: string[] = [];
+
+    function scanDir(dir: string) {
+        try {
+            if (!nodeFs.existsSync(dir)) return;
+            const entries = nodeFs.readdirSync(dir, { withFileTypes: true });
+            for (const entry of entries) {
+                const fullPath = nodePath.join(dir, entry.name);
+                if (entry.isDirectory()) {
+                    scanDir(fullPath);
+                } else {
+                    const ext = nodePath.extname(entry.name).toLowerCase();
+                    if (['.h', '.hpp', '.hxx', '.cpp', '.c', '.cc', '.cxx', '.hlsl'].includes(ext)) {
+                        scanFile(fullPath, entry.name);
+                    }
+                }
+            }
+        } catch {}
+    }
+
+    function scanFile(filePath: string, fileName: string) {
+        try {
+            const content = nodeFs.readFileSync(filePath, 'utf-8');
+            const lines = content.split('\n');
+            const fileSigs: string[] = [];
+
+            for (let i = 0; i < lines.length; i++) {
+                const line = lines[i].trim();
+
+                // Skip empty lines, comments, preprocessor guards
+                if (!line || line.startsWith('//') || line === '#pragma once' || line.startsWith('#ifndef') || line.startsWith('#define _') || line.startsWith('#endif')) continue;
+
+                // Function declarations/definitions: return_type name(params)
+                const funcMatch = line.match(/^(?:(?:static|inline|virtual|extern|__declspec\([^)]*\))\s+)*(\w[\w:*&<> ]*?)\s+(\w+)\s*\(([^)]*)\)\s*(?:const\s*)?(?:override\s*)?[;{]/);
+                if (funcMatch && !['if', 'while', 'for', 'switch', 'return', 'else', 'case'].includes(funcMatch[2])) {
+                    fileSigs.push(`${funcMatch[1]} ${funcMatch[2]}(${funcMatch[3].trim()})`);
+                    continue;
+                }
+
+                // Class/struct declarations
+                const classMatch = line.match(/^(?:class|struct)\s+(?:__declspec\([^)]*\)\s+)?(\w+)\s*(?::\s*(?:public|private|protected)\s+\w[\w:<> ]*)?(?:\s*\{)?/);
+                if (classMatch) {
+                    fileSigs.push(`${line.startsWith('struct') ? 'struct' : 'class'} ${classMatch[1]}`);
+                    continue;
+                }
+
+                // Enum declarations
+                const enumMatch = line.match(/^enum\s+(?:class\s+)?(\w+)/);
+                if (enumMatch) {
+                    fileSigs.push(`enum ${enumMatch[1]}`);
+                    continue;
+                }
+
+                // Typedef
+                if (line.startsWith('typedef ')) {
+                    const shortTypedef = line.length < 120 ? line.replace(/;$/, '') : line.substring(0, 120) + '...';
+                    fileSigs.push(shortTypedef);
+                    continue;
+                }
+
+                // #define macros (skip include guards)
+                const defineMatch = line.match(/^#define\s+(\w+)(?:\(([^)]*)\))?\s*(.*)/);
+                if (defineMatch && defineMatch[1] && !defineMatch[1].startsWith('_') && defineMatch[1] !== defineMatch[1].toUpperCase() + '_H') {
+                    const macro = defineMatch[2] !== undefined
+                        ? `#define ${defineMatch[1]}(${defineMatch[2]})`
+                        : `#define ${defineMatch[1]}`;
+                    fileSigs.push(macro);
+                    continue;
+                }
+
+                // Global variable declarations (extern)
+                if (line.startsWith('extern ') && line.endsWith(';')) {
+                    fileSigs.push(line.replace(/;$/, ''));
+                    continue;
+                }
+            }
+
+            if (fileSigs.length > 0) {
+                scannedFiles.push(fileName);
+                signatures.push(`// ${fileName}\n${fileSigs.join('\n')}`);
+            }
+        } catch {}
+    }
+
+    scanDir(srcDir);
+    scanDir(includeDir);
+    // Also scan root-level headers
+    try {
+        const rootEntries = nodeFs.readdirSync(currentProject.path);
+        for (const name of rootEntries) {
+            const ext = nodePath.extname(name).toLowerCase();
+            if (['.h', '.hpp'].includes(ext)) {
+                scanFile(nodePath.join(currentProject.path, name), name);
+            }
+        }
+    } catch {}
+
+    if (signatures.length === 0) return '';
+
+    // Truncate if too large (keep under ~4000 chars to not blow up context)
+    let result = signatures.join('\n\n');
+    if (result.length > 4000) {
+        result = result.substring(0, 4000) + '\n// ... (truncated, ' + scannedFiles.length + ' files scanned)';
+    }
+
+    projectSignaturesCache = result;
+    projectSignaturesCacheTime = now;
+    return result;
+}
+
+function getSystemPrompt(): string {
+    let prompt = XBOX360_SYSTEM_PROMPT;
+
+    // Inject project signatures
+    const sigs = scanProjectSignatures();
+    if (sigs) {
+        prompt += `\n\nThe user's current project contains the following declarations and signatures. Use these for accurate code completion, references, and suggestions:\n\n${sigs}`;
+    }
+
+    if (userSettings.aiSystemPrompt) {
+        prompt += '\n\n' + userSettings.aiSystemPrompt;
+    }
+    return prompt;
+}
+
+async function aiComplete(messages: { role: string; content: string }[]): Promise<string> {
+    const url = getAIRequestURL();
+    const s = userSettings;
+
+    if (s.aiProvider === 'anthropic') {
+        const body = {
+            model: getAIModel(),
+            max_tokens: 4096,
+            system: getSystemPrompt(),
+            messages,
+        };
+        const headers: Record<string, string> = {
+            'Content-Type': 'application/json',
+            'x-api-key': s.aiApiKey,
+            'anthropic-version': '2023-06-01',
+        };
+        const resp = await aiRequestRaw(url, body, headers);
+        return (resp.content || []).map((b: any) => b.text || '').join('');
+    } else {
+        const model = getAIModel();
+        const sysPrompt = getSystemPrompt();
+        const allMessages: any[] = [];
+        if (sysPrompt) allMessages.push({ role: 'system', content: sysPrompt });
+        allMessages.push(...messages);
+        const body: any = { messages: allMessages, max_tokens: 4096 };
+        if (model) body.model = model;
+        const resp = await aiRequest(url, body, s.aiApiKey || undefined);
+        return resp.choices?.[0]?.message?.content || '';
+    }
+}
+
+function setAIStatus(state: 'connected' | 'disconnected' | 'loading' | 'error', text?: string) {
+    const dot = $('ai-status-dot');
+    const txt = $('ai-status-text');
+    const label = $('ai-provider-label');
+    dot.className = 'ai-dot ' + state;
+    if (text) txt.textContent = text;
+    const providerNames: Record<string, string> = { anthropic: 'Claude', openai: 'GPT', local: 'Ollama', custom: 'Custom' };
+    label.textContent = userSettings.aiApiKey || userSettings.aiProvider === 'local' ? providerNames[userSettings.aiProvider] || '' : '';
+}
+
+let aiAbortStream: (() => void) | null = null;
+
+async function sendAIMessage(userText: string, contextCode?: string) {
+    if (!userText.trim() || aiStreaming) return;
+    if (!userSettings.aiApiKey && userSettings.aiProvider !== 'local' && userSettings.aiProvider !== 'custom') {
+        addAIMessage('system', '⚠ No API key configured. Click the ⚙ button to set up your AI provider.');
+        return;
+    }
+
+    let fullPrompt = userText;
+    if (contextCode) {
+        fullPrompt = `Here is the relevant code:\n\`\`\`cpp\n${contextCode}\n\`\`\`\n\n${userText}`;
+    } else if (userSettings.aiFileContext && editor) {
+        const currentCode = editor.getValue();
+        const currentTab = openTabs.find(t => t.path === activeTab);
+        if (currentCode && currentCode.length < 8000 && currentTab) {
+            fullPrompt = `I'm working on file "${currentTab?.name || 'unknown'}". Here's the current code:\n\`\`\`cpp\n${currentCode}\n\`\`\`\n\n${userText}`;
+        }
+    }
+
+    addAIMessage('user', userText);
+    showAITyping();
+    setAIStatus('loading', 'Thinking...');
+    aiStreaming = true;
+    ($('ai-send') as HTMLButtonElement).disabled = false;
+    $('ai-send').textContent = '↑';
+    $('ai-send').textContent = '■'; // Stop icon
+
+    const apiMessages = aiMessages
+        .filter(m => m.role !== 'system')
+        .map(m => ({ role: m.role, content: m.role === 'user' && m === aiMessages[aiMessages.length - 1] ? fullPrompt : m.content }));
+
+    const url = getAIRequestURL();
+    const s = userSettings;
+
+    // Build request body and headers based on provider
+    let body: any;
+    let headers: Record<string, string> = { 'Content-Type': 'application/json' };
+
+    if (s.aiProvider === 'anthropic') {
+        headers['x-api-key'] = s.aiApiKey;
+        headers['anthropic-version'] = '2023-06-01';
+        body = { model: getAIModel(), max_tokens: 4096, system: getSystemPrompt(), messages: apiMessages };
+        // Anthropic streaming uses a different SSE format — fall back to non-streaming for now
+        try {
+            const resp = await aiRequestRaw(url, body, headers);
+            const reply = (resp.content || []).map((b: any) => b.text || '').join('');
+            hideAITyping();
+            if (reply) { addAIMessage('assistant', reply); setAIStatus('connected', 'Ready'); }
+            else { addAIMessage('system', '⚠ Empty response.'); setAIStatus('error', 'Empty'); }
+        } catch (err: any) {
+            hideAITyping();
+            addAIMessage('system', `❌ Error: ${err.message}`);
+            setAIStatus('error', 'Failed');
+        }
+        aiStreaming = false;
+        ($('ai-send') as HTMLButtonElement).disabled = false;
+    $('ai-send').textContent = '↑';
+        return;
+    }
+
+    // OpenAI-compatible providers — use SSE streaming
+    if (s.aiApiKey) headers['Authorization'] = `Bearer ${s.aiApiKey}`;
+    const model = getAIModel();
+    const sysPrompt = getSystemPrompt();
+    const allMessages: any[] = [];
+    if (sysPrompt) allMessages.push({ role: 'system', content: sysPrompt });
+    allMessages.push(...apiMessages);
+    body = { messages: allMessages, max_tokens: 4096 };
+    if (model) body.model = model;
+
+    // Create the streaming message element
+    hideAITyping();
+    const streamMsg: AIMessage = { role: 'assistant', content: '', timestamp: Date.now() };
+    aiMessages.push(streamMsg);
+    const streamEl = createStreamingMessageEl();
+    const bodyEl = streamEl.querySelector('.ai-msg-body') as HTMLElement;
+
+    let tokenCount = 0;
+
+    aiAbortStream = aiStreamSSE(url, body, headers,
+        // onToken — live update
+        (token: string) => {
+            streamMsg.content += token;
+            tokenCount++;
+            // Re-render markdown every few tokens (throttled for performance)
+            if (tokenCount % 3 === 0 || token.includes('\n')) {
+                bodyEl.innerHTML = renderMarkdown(streamMsg.content);
+                addCopyButtonsToCodeBlocks(bodyEl);
+            }
+            streamEl.scrollIntoView({ behavior: 'auto', block: 'end' });
+            setAIStatus('loading', `Streaming... (${streamMsg.content.length} chars)`);
+        },
+        // onDone
+        (fullText: string) => {
+            streamMsg.content = fullText;
+            bodyEl.innerHTML = renderMarkdown(fullText);
+            addCopyButtonsToCodeBlocks(bodyEl);
+            // Remove streaming visual state
+            streamEl.classList.remove('ai-msg-streaming');
+            const badge = streamEl.querySelector('.ai-msg-streaming-badge');
+            if (badge) badge.remove();
+            // Add action buttons
+            addMessageActionButtons(streamEl, streamMsg);
+            streamEl.scrollIntoView({ behavior: 'smooth', block: 'end' });
+            setAIStatus('connected', 'Ready');
+            aiStreaming = false;
+            aiAbortStream = null;
+            ($('ai-send') as HTMLButtonElement).disabled = false;
+    $('ai-send').textContent = '↑';
+        },
+        // onError
+        (err: Error) => {
+            if (streamMsg.content) {
+                // Partial response — keep what we got
+                bodyEl.innerHTML = renderMarkdown(streamMsg.content);
+                addCopyButtonsToCodeBlocks(bodyEl);
+            } else {
+                streamEl.remove();
+                aiMessages.pop();
+            }
+            addAIMessage('system', `❌ Stream error: ${err.message}`);
+            setAIStatus('error', 'Stream failed');
+            aiStreaming = false;
+            aiAbortStream = null;
+            ($('ai-send') as HTMLButtonElement).disabled = false;
+    $('ai-send').textContent = '↑';
+        },
+    );
+}
+
+function createStreamingMessageEl(): HTMLElement {
+    const container = $('ai-messages');
+    const welcome = container.querySelector('.ai-welcome');
+    if (welcome) welcome.remove();
+
+    const el = document.createElement('div');
+    el.className = 'ai-msg ai-msg-streaming';
+    const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    el.innerHTML = `<div class="ai-msg-header"><span class="ai-msg-role assistant">Nexia AI</span><span class="ai-msg-streaming-badge">● streaming</span><span class="ai-msg-time">${time}</span></div><div class="ai-msg-body"><span class="ai-cursor-blink">▊</span></div>`;
+    container.appendChild(el);
+    el.scrollIntoView({ behavior: 'smooth', block: 'end' });
+    return el;
+}
+
+function addCopyButtonsToCodeBlocks(container: HTMLElement) {
+    container.querySelectorAll('pre').forEach(pre => {
+        if (pre.querySelector('.ai-code-copy')) return; // already has one
+        const copyBtn = document.createElement('button');
+        copyBtn.className = 'ai-code-copy';
+        copyBtn.textContent = '📋';
+        copyBtn.title = 'Copy code';
+        copyBtn.addEventListener('click', () => {
+            const code = pre.querySelector('code')?.textContent || pre.textContent || '';
+            navigator.clipboard.writeText(code);
+            copyBtn.textContent = '✓';
+            setTimeout(() => copyBtn.textContent = '📋', 1500);
+        });
+        pre.style.position = 'relative';
+        pre.appendChild(copyBtn);
+    });
+}
+
+function addAIMessage(role: 'user' | 'assistant' | 'system', content: string) {
+    const msg: AIMessage = { role, content, timestamp: Date.now() };
+    aiMessages.push(msg);
+    renderAIMessage(msg);
+}
+
+function addMessageActionButtons(el: HTMLElement, msg: AIMessage) {
+    const actions = document.createElement('div');
+    actions.className = 'ai-msg-actions';
+    actions.innerHTML = `<button class="ai-msg-action-btn" data-action="copy" title="Copy response">📋</button><button class="ai-msg-action-btn" data-action="edit" title="Edit response">✏️</button><button class="ai-msg-action-btn" data-action="retry" title="Retry">🔄</button>`;
+
+    actions.querySelector('[data-action="copy"]')!.addEventListener('click', () => {
+        navigator.clipboard.writeText(msg.content);
+        const btn = actions.querySelector('[data-action="copy"]')!;
+        btn.textContent = '✓';
+        setTimeout(() => btn.textContent = '📋', 1500);
+    });
+
+    actions.querySelector('[data-action="edit"]')!.addEventListener('click', () => {
+        const bodyEl = el.querySelector('.ai-msg-body') as HTMLElement;
+        if (bodyEl.contentEditable === 'true') {
+            bodyEl.contentEditable = 'false';
+            bodyEl.classList.remove('ai-msg-editing');
+            msg.content = bodyEl.innerText;
+            bodyEl.innerHTML = renderMarkdown(msg.content);
+            addCopyButtonsToCodeBlocks(bodyEl);
+            actions.querySelector('[data-action="edit"]')!.textContent = '✏️';
+        } else {
+            bodyEl.contentEditable = 'true';
+            bodyEl.classList.add('ai-msg-editing');
+            bodyEl.innerText = msg.content;
+            bodyEl.focus();
+            actions.querySelector('[data-action="edit"]')!.textContent = '💾';
+        }
+    });
+
+    actions.querySelector('[data-action="retry"]')!.addEventListener('click', () => {
+        retryAIMessage(msg, el);
+    });
+
+    el.appendChild(actions);
+}
+
+function renderAIMessage(msg: AIMessage) {
+    const container = $('ai-messages');
+    const welcome = container.querySelector('.ai-welcome');
+    if (welcome) welcome.remove();
+
+    const el = document.createElement('div');
+    el.className = 'ai-msg';
+    const time = new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const roleLabel = msg.role === 'user' ? 'You' : msg.role === 'assistant' ? 'Nexia AI' : 'System';
+
+    el.innerHTML = `<div class="ai-msg-header"><span class="ai-msg-role ${msg.role}">${roleLabel}</span><span class="ai-msg-time">${time}</span></div><div class="ai-msg-body"></div>`;
+
+    const body = el.querySelector('.ai-msg-body')!;
+    body.innerHTML = renderMarkdown(msg.content);
+    addCopyButtonsToCodeBlocks(body as HTMLElement);
+
+    // Action buttons for assistant messages
+    if (msg.role === 'assistant') {
+        addMessageActionButtons(el, msg);
+    }
+
+    container.appendChild(el);
+    el.scrollIntoView({ behavior: 'smooth', block: 'end' });
+}
+
+function retryAIMessage(msg: AIMessage, msgEl: HTMLElement) {
+    if (aiStreaming) return;
+
+    // Find the user message that preceded this assistant response
+    const msgIdx = aiMessages.indexOf(msg);
+    if (msgIdx < 0) return;
+
+    // Walk backwards to find the preceding user message
+    let userMsg: AIMessage | null = null;
+    for (let i = msgIdx - 1; i >= 0; i--) {
+        if (aiMessages[i].role === 'user') {
+            userMsg = aiMessages[i];
+            break;
+        }
+    }
+
+    if (!userMsg) return;
+
+    // Remove the assistant message from array and DOM
+    aiMessages.splice(msgIdx, 1);
+    msgEl.remove();
+
+    // Also remove the user message from array and DOM
+    const userIdx = aiMessages.indexOf(userMsg);
+    if (userIdx >= 0) {
+        aiMessages.splice(userIdx, 1);
+        // Find and remove the user message DOM element
+        const allMsgEls = $('ai-messages').querySelectorAll('.ai-msg');
+        allMsgEls.forEach(el => {
+            const roleEl = el.querySelector('.ai-msg-role');
+            if (roleEl?.classList.contains('user') && el.querySelector('.ai-msg-body')?.textContent?.trim() === userMsg!.content.trim()) {
+                el.remove();
+            }
+        });
+    }
+
+    // Resend the original user message
+    sendAIMessage(userMsg.content);
+}
+
+function formatAIContent(text: string): string {
+    return renderMarkdown(text);
+}
+
+function showAITyping() {
+    // Auto-switch to AI panel so user sees the response
+    const aiTab = document.querySelector('[data-panel="ai"]') as HTMLElement;
+    if (aiTab && !aiTab.classList.contains('active')) aiTab.click();
+
+    const container = $('ai-messages');
+    const el = document.createElement('div');
+    el.className = 'ai-typing';
+    el.id = 'ai-typing-indicator';
+    el.innerHTML = '<div class="ai-typing-dots"><span class="ai-typing-dot"></span><span class="ai-typing-dot"></span><span class="ai-typing-dot"></span></div><span class="ai-typing-label">Nexia AI is thinking...</span>';
+    container.appendChild(el);
+    el.scrollIntoView({ behavior: 'smooth', block: 'end' });
+}
+
+function hideAITyping() {
+    const el = document.getElementById('ai-typing-indicator');
+    if (el) el.remove();
+}
+
+function clearAIChat() {
+    aiMessages = [];
+    const container = $('ai-messages');
+    container.innerHTML = `<div class="ai-welcome"><div class="ai-welcome-icon">🤖</div><div class="ai-welcome-title">Nexia AI</div><div class="ai-welcome-desc">Your Xbox 360 development assistant. Ask questions about XDK APIs, debug build errors, or generate code.</div><div class="ai-quick-actions"><button class="ai-quick-btn" data-prompt="Explain the Xbox 360 D3D initialization process">📖 D3D Init Guide</button><button class="ai-quick-btn" data-prompt="Show me a basic Xbox 360 input polling loop">🎮 Input Polling</button><button class="ai-quick-btn" data-prompt="How do I set up audio using XAudio2 on Xbox 360?">🔊 Audio Setup</button><button class="ai-quick-btn" data-prompt="What are common Xbox 360 build errors and how to fix them?">🔧 Build Errors</button></div></div>`;
+}
+
+// ── AI Error Analysis ──
+
+async function analyzeAIBuildErrors(errors: any[], warnings: any[]) {
+    if (!userSettings.aiAutoErrors) return;
+    if (!userSettings.aiApiKey && userSettings.aiProvider !== 'local') return;
+    if (errors.length === 0) return;
+
+    const errorsView = $('ai-errors-content');
+    const emptyView = $('ai-errors-empty');
+    const summary = $('ai-errors-summary');
+    const list = $('ai-errors-list');
+
+    emptyView.classList.add('hidden');
+    errorsView.classList.remove('hidden');
+    summary.innerHTML = `<strong>🔴 ${errors.length} error${errors.length > 1 ? 's' : ''}</strong>${warnings.length ? `, ⚠ ${warnings.length} warning${warnings.length > 1 ? 's' : ''}` : ''} — analyzing...`;
+    list.innerHTML = '<div class="ai-typing" style="padding:16px;"><div class="ai-typing-dots"><span class="ai-typing-dot"></span><span class="ai-typing-dot"></span><span class="ai-typing-dot"></span></div><span class="ai-typing-label">Analyzing errors...</span></div>';
+
+    // Update the AI tab badge
+    const aiTab = document.querySelector('[data-panel="ai"]');
+    if (aiTab) aiTab.setAttribute('data-badge', String(errors.length));
+
+    const errorText = errors.map(e => `${e.file || '?'}:${e.line || '?'}: ${e.message}`).join('\n');
+    const warningText = warnings.map(w => `${w.file || '?'}:${w.line || '?'}: ${w.message}`).join('\n');
+
+    // Get current file content for context
+    let codeContext = '';
+    if (editor && errors[0]?.file) {
+        const code = editor.getValue();
+        if (code.length < 6000) codeContext = `\nCurrent file content:\n\`\`\`cpp\n${code}\n\`\`\``;
+    }
+
+    const prompt = `Analyze these Xbox 360 build errors and provide a fix for each one. Be concise.
+${codeContext}
+
+ERRORS:
+${errorText}
+${warningText ? '\nWARNINGS:\n' + warningText : ''}
+
+For each error, respond with:
+1. What caused it (one sentence)
+2. How to fix it (specific code change)`;
+
+    try {
+        const reply = await aiComplete([{ role: 'user', content: prompt }]);
+
+        summary.innerHTML = `<strong>🔴 ${errors.length} error${errors.length > 1 ? 's' : ''}</strong>${warnings.length ? `, ⚠ ${warnings.length} warning${warnings.length > 1 ? 's' : ''}` : ''} — AI analysis complete`;
+        list.innerHTML = '';
+
+        const analysisEl = document.createElement('div');
+        analysisEl.className = 'ai-error-item';
+        analysisEl.innerHTML = `<div class="ai-msg-body">${formatAIContent(reply)}</div>`;
+        list.appendChild(analysisEl);
+
+    } catch (err: any) {
+        summary.innerHTML = `<strong>🔴 ${errors.length} error${errors.length > 1 ? 's' : ''}</strong> — analysis failed`;
+        list.innerHTML = `<div class="ai-error-item"><div class="ai-error-item-explanation">❌ Could not analyze: ${err.message}</div></div>`;
+    }
+}
+
+// ── AI Code Generation ──
+
+async function generateAICode() {
+    const prompt = ($('ai-gen-prompt') as HTMLTextAreaElement).value.trim();
+    if (!prompt) return;
+    if (!userSettings.aiApiKey && userSettings.aiProvider !== 'local') {
+        alert('No API key configured. Open AI Settings first.');
+        return;
+    }
+
+    const addComments = ($('ai-gen-comments') as HTMLInputElement).checked;
+    const addIncludes = ($('ai-gen-includes') as HTMLInputElement).checked;
+    const addErrorHandling = ($('ai-gen-error-handling') as HTMLInputElement).checked;
+
+    const genBtn = $('ai-gen-submit') as HTMLButtonElement;
+    genBtn.disabled = true;
+    genBtn.textContent = '⏳ Generating...';
+    $('ai-gen-result').classList.add('hidden');
+
+    const fullPrompt = `Generate Xbox 360 C++ code for the following request. Return ONLY the code, no explanation.
+${addComments ? 'Add clear comments.' : 'Minimal comments.'}
+${addIncludes ? 'Include all necessary #include directives.' : 'Do not include #include directives.'}
+${addErrorHandling ? 'Add proper error handling (HRESULT checks, null checks).' : 'Skip error handling for brevity.'}
+
+Request: ${prompt}`;
+
+    try {
+        let reply = await aiComplete([{ role: 'user', content: fullPrompt }]);
+
+        // Strip markdown code fences if present
+        reply = reply.replace(/^```[\w]*\n?/, '').replace(/\n?```$/, '').trim();
+
+        $('ai-gen-code-text').textContent = reply;
+        $('ai-gen-result').classList.remove('hidden');
+    } catch (err: any) {
+        alert('Generation failed: ' + err.message);
+    } finally {
+        genBtn.disabled = false;
+        genBtn.textContent = '⚡ Generate Code';
+    }
+}
+
+// ── AI Inline Suggestions ──
+
+let inlineSuggestTimer: any = null;
+
+function triggerInlineSuggestion() {
+    if (!userSettings.aiInlineSuggest || !userSettings.aiApiKey) return;
+    if (!editor) return;
+
+    clearTimeout(inlineSuggestTimer);
+    inlineSuggestTimer = setTimeout(async () => {
+        const pos = editor.getPosition();
+        if (!pos) return;
+        const model = editor.getModel();
+        if (!model) return;
+
+        // Get surrounding code context
+        const startLine = Math.max(1, pos.lineNumber - 20);
+        const endLine = pos.lineNumber;
+        const codeAbove = model.getValueInRange({ startLineNumber: startLine, startColumn: 1, endLineNumber: endLine, endColumn: pos.column });
+        const currentLine = model.getLineContent(pos.lineNumber);
+
+        // Only suggest if the line is non-empty and we're at the end
+        if (!currentLine.trim() || pos.column < currentLine.length) return;
+
+        try {
+            let suggestion = await aiComplete([{
+                role: 'user',
+                content: `Complete the following Xbox 360 C++ code. Return ONLY the completion (the next 1-5 lines), nothing else. No explanation.\n\n${codeAbove}`,
+            }]);
+
+            suggestion = suggestion.replace(/^```[\w]*\n?/, '').replace(/\n?```$/, '').trim();
+            if (!suggestion) return;
+
+            showInlineSuggestion(suggestion, pos);
+        } catch {}
+    }, 1500); // 1.5s debounce
+}
+
+function showInlineSuggestion(text: string, position: any) {
+    const widget = $('ai-inline-widget');
+    $('ai-inline-text').textContent = text;
+    widget.classList.remove('hidden');
+
+    // Position near cursor
+    const editorDom = $('editor-container');
+    const rect = editorDom.getBoundingClientRect();
+    const coords = editor.getScrolledVisiblePosition(position);
+    if (coords) {
+        widget.style.left = Math.min(rect.left + coords.left, window.innerWidth - 520) + 'px';
+        widget.style.top = (rect.top + coords.top + 20) + 'px';
+    }
+
+    (window as any).__aiInlineSuggestion = text;
+}
+
+function acceptInlineSuggestion() {
+    const text = (window as any).__aiInlineSuggestion;
+    if (!text || !editor) return;
+    const pos = editor.getPosition();
+    if (pos) {
+        editor.executeEdits('ai-inline', [{ range: new (window as any).monaco.Range(pos.lineNumber, pos.column, pos.lineNumber, pos.column), text: '\n' + text }]);
+    }
+    dismissInlineSuggestion();
+}
+
+function dismissInlineSuggestion() {
+    $('ai-inline-widget').classList.add('hidden');
+    (window as any).__aiInlineSuggestion = null;
+}
+
+// ── Breadcrumb Bar ──
+
+function updateBreadcrumb(filePath?: string) {
+    const bar = $('breadcrumb-bar');
+    const pathEl = $('breadcrumb-path');
+    if (!filePath) { bar.classList.add('hidden'); return; }
+    bar.classList.remove('hidden');
+
+    const parts = filePath.replace(/\\/g, '/').split('/');
+    // Show last 3-4 parts
+    const visible = parts.slice(-4);
+    pathEl.innerHTML = visible.map((part, i) => {
+        const isLast = i === visible.length - 1;
+        return `<span class="breadcrumb-item${isLast ? ' active' : ''}">${part}</span>${!isLast ? '<span class="breadcrumb-sep">›</span>' : ''}`;
+    }).join('');
+}
+
+// ── AI Context Menu for Editor ──
+
+function addAIContextMenuItems(items: CtxItem[]): CtxItem[] {
+    if (!userSettings.aiApiKey && userSettings.aiProvider !== 'local') return items;
+
+    items.push({ label: '─', action: () => {} });
+    items.push({
+        label: '🤖 Ask AI about this code',
+        action: () => {
+            const selection = editor?.getModel()?.getValueInRange(editor.getSelection());
+            if (selection) {
+                switchToAIPanel();
+                setAIContext(selection);
+                ($('ai-input') as HTMLTextAreaElement).focus();
+            } else {
+                switchToAIPanel();
+                ($('ai-input') as HTMLTextAreaElement).focus();
+            }
+        },
+    });
+    items.push({
+        label: '⚡ Generate code here',
+        action: () => {
+            switchToAIPanel();
+            switchAIMode('generate');
+            ($('ai-gen-prompt') as HTMLTextAreaElement).focus();
+        },
+    });
+    items.push({
+        label: '📖 Explain this code',
+        action: () => {
+            const selection = editor?.getModel()?.getValueInRange(editor.getSelection());
+            if (selection) {
+                switchToAIPanel();
+                sendAIMessage('Explain this code in detail:', selection);
+            }
+        },
+    });
+    items.push({
+        label: '🔧 Fix / improve this code',
+        action: () => {
+            const selection = editor?.getModel()?.getValueInRange(editor.getSelection());
+            if (selection) {
+                switchToAIPanel();
+                sendAIMessage('Fix any bugs and suggest improvements for this code:', selection);
+            }
+        },
+    });
+    return items;
+}
+
+function switchToAIPanel() {
+    // Click the AI sidebar tab
+    const aiTab = document.querySelector('[data-panel="ai"]') as HTMLElement;
+    if (aiTab) aiTab.click();
+}
+
+function switchAIMode(mode: string) {
+    document.querySelectorAll('.ai-mode-tab').forEach(t => t.classList.toggle('active', t.getAttribute('data-ai-mode') === mode));
+    document.querySelectorAll('.ai-view').forEach(v => v.classList.remove('active'));
+    const view = document.getElementById(`ai-${mode}-view`);
+    if (view) view.classList.add('active');
+}
+
+function setAIContext(code: string) {
+    const badge = $('ai-context-badge');
+    const text = $('ai-context-text');
+    const lines = code.split('\n');
+    text.textContent = `📎 ${lines.length} line${lines.length > 1 ? 's' : ''} of code attached`;
+    badge.classList.remove('hidden');
+    (badge as any).__contextCode = code;
+}
+
+// ── AI Settings Dialog ──
+
+function openAISettings() {
+    const overlay = $('ai-settings-overlay');
+    overlay.classList.remove('hidden');
+    // Populate from current settings
+    ($('ai-provider') as HTMLSelectElement).value = userSettings.aiProvider;
+    ($('ai-api-key') as HTMLInputElement).value = userSettings.aiApiKey;
+    ($('ai-endpoint-url') as HTMLInputElement).value = userSettings.aiEndpoint;
+    ($('ai-model') as HTMLInputElement).value = userSettings.aiModel || '';
+    ($('ai-system-prompt') as HTMLTextAreaElement).value = userSettings.aiSystemPrompt;
+    ($('ai-auto-errors') as HTMLInputElement).checked = userSettings.aiAutoErrors;
+    ($('ai-inline-suggest') as HTMLInputElement).checked = userSettings.aiInlineSuggest;
+    ($('ai-file-context') as HTMLInputElement).checked = userSettings.aiFileContext;
+    toggleCustomEndpointField();
+}
+
+function toggleCustomEndpointField() {
+    const provider = ($('ai-provider') as HTMLSelectElement).value;
+    $('ai-custom-endpoint').classList.toggle('hidden', provider !== 'custom' && provider !== 'local');
+}
+
+
+function saveAISettings() {
+    userSettings.aiProvider = ($('ai-provider') as HTMLSelectElement).value as any;
+    userSettings.aiApiKey = ($('ai-api-key') as HTMLInputElement).value;
+    userSettings.aiEndpoint = ($('ai-endpoint-url') as HTMLInputElement).value;
+    userSettings.aiModel = ($('ai-model') as HTMLInputElement).value.trim();
+    userSettings.aiSystemPrompt = ($('ai-system-prompt') as HTMLTextAreaElement).value;
+    userSettings.aiAutoErrors = ($('ai-auto-errors') as HTMLInputElement).checked;
+    userSettings.aiInlineSuggest = ($('ai-inline-suggest') as HTMLInputElement).checked;
+    userSettings.aiFileContext = ($('ai-file-context') as HTMLInputElement).checked;
+    saveUserSettings();
+    $('ai-settings-overlay').classList.add('hidden');
+    updateAIStatusFromSettings();
+}
+
+function updateAIStatusFromSettings() {
+    if (userSettings.aiApiKey || userSettings.aiProvider === 'local') {
+        setAIStatus('connected', 'Ready');
+    } else {
+        setAIStatus('disconnected', 'No API key configured');
+    }
+}
+
+async function testAIConnection() {
+    const origKey = userSettings.aiApiKey;
+    const origProvider = userSettings.aiProvider;
+    const origEndpoint = userSettings.aiEndpoint;
+    const origModel = userSettings.aiModel;
+    userSettings.aiApiKey = ($('ai-api-key') as HTMLInputElement).value;
+    userSettings.aiProvider = ($('ai-provider') as HTMLSelectElement).value as any;
+    userSettings.aiEndpoint = ($('ai-endpoint-url') as HTMLInputElement).value;
+    userSettings.aiModel = ($('ai-model') as HTMLInputElement).value.trim();
+
+    const btn = $('ai-test-connection') as HTMLButtonElement;
+    btn.disabled = true;
+    btn.textContent = '⏳ Testing...';
+
+    try {
+        await aiComplete([{ role: 'user', content: 'Say "connected" and nothing else.' }]);
+        btn.textContent = '✅ Connected!';
+    } catch (err: any) {
+        btn.textContent = `❌ ${err.message.substring(0, 40)}`;
+    }
+
+    userSettings.aiApiKey = origKey;
+    userSettings.aiProvider = origProvider;
+    userSettings.aiEndpoint = origEndpoint;
+    userSettings.aiModel = origModel;
+
+    setTimeout(() => { btn.disabled = false; btn.textContent = '🔌 Test Connection'; }, 3000);
+}
+
+// ── Initialize AI System ──
+
+// ══════════════════════════════════════════════════════════════════════
+// AI HINT BAR — Selection-triggered inline actions
+// ══════════════════════════════════════════════════════════════════════
+
+let hintBarDebounce: any = null;
+let hintBarSelection: { text: string; range: any } | null = null;
+let hintResultData: { action: string; code: string; result: string } | null = null;
+
+function initAIHintBar() {
+    if (!editor) return;
+
+    // Listen for selection changes in Monaco
+    editor.onDidChangeCursorSelection((e: any) => {
+        clearTimeout(hintBarDebounce);
+        const selection = e.selection;
+        const model = editor.getModel();
+        if (!model) return;
+
+        const text = model.getValueInRange(selection).trim();
+        if (!text || text.length < 3 || selection.startLineNumber === selection.endLineNumber && selection.startColumn === selection.endColumn) {
+            hideHintBar();
+            return;
+        }
+
+        // Debounce — show after 400ms of stable selection
+        hintBarDebounce = setTimeout(() => {
+            hintBarSelection = { text, range: selection };
+            showHintBar(selection);
+        }, 400);
+    });
+
+    // Hint bar button clicks
+    $('ai-hint-bar').addEventListener('click', (e: MouseEvent) => {
+        const btn = (e.target as HTMLElement).closest('.ai-hint-btn') as HTMLElement;
+        if (!btn || !hintBarSelection) return;
+        const action = btn.getAttribute('data-action');
+        if (action) executeHintAction(action, hintBarSelection.text, hintBarSelection.range);
+    });
+
+    // Result panel buttons
+    $('ai-hint-result-close').addEventListener('click', hideHintResult);
+    $('ai-hint-reject').addEventListener('click', hideHintResult);
+    $('ai-hint-apply').addEventListener('click', applyHintResult);
+    $('ai-hint-copy').addEventListener('click', () => {
+        if (hintResultData) {
+            navigator.clipboard.writeText(hintResultData.result);
+            ($('ai-hint-copy') as HTMLElement).textContent = '✓ Copied';
+            setTimeout(() => ($('ai-hint-copy') as HTMLElement).textContent = '📋 Copy', 1500);
+        }
+    });
+
+    // Hide hint bar when editor scrolls or loses focus
+    editor.onDidScrollChange(() => { hideHintBar(); hideHintResult(); });
+    editor.onDidBlurEditorText(() => {
+        // Small delay so clicking hint bar buttons works
+        setTimeout(() => {
+            if (!document.querySelector('.ai-hint-bar:hover') && !document.querySelector('.ai-hint-result:hover')) {
+                hideHintBar();
+            }
+        }, 200);
+    });
+}
+
+function showHintBar(selection: any) {
+    if (!editor) return;
+    // Don't show if no API configured
+    if (!userSettings.aiApiKey && userSettings.aiProvider !== 'local' && userSettings.aiProvider !== 'custom') return;
+
+    const bar = $('ai-hint-bar');
+    const editorDom = $('editor-container');
+    const editorRect = editorDom.getBoundingClientRect();
+
+    // Get position of the start of the selection
+    const coords = editor.getScrolledVisiblePosition({ lineNumber: selection.startLineNumber, column: selection.startColumn });
+    if (!coords) { hideHintBar(); return; }
+
+    const x = editorRect.left + coords.left;
+    const y = editorRect.top + coords.top - 36; // 36px above selection
+
+    // Keep on screen
+    bar.classList.remove('hidden');
+    const barWidth = bar.offsetWidth || 250;
+    bar.style.left = Math.max(editorRect.left, Math.min(x, window.innerWidth - barWidth - 8)) + 'px';
+    bar.style.top = Math.max(editorRect.top, y) + 'px';
+}
+
+function hideHintBar() {
+    $('ai-hint-bar').classList.add('hidden');
+}
+
+function hideHintResult() {
+    $('ai-hint-result').classList.add('hidden');
+    hintResultData = null;
+}
+
+function showHintResult(x: number, y: number) {
+    const panel = $('ai-hint-result');
+    panel.classList.remove('hidden');
+    const pw = 520;
+    const ph = panel.offsetHeight || 200;
+    panel.style.left = Math.max(8, Math.min(x, window.innerWidth - pw - 8)) + 'px';
+    panel.style.top = Math.max(8, Math.min(y, window.innerHeight - ph - 8)) + 'px';
+}
+
+function setHintResultLoading(action: string) {
+    const titles: Record<string, string> = {
+        explain: '📖 Explaining...',
+        fix: '🔧 Auto Fixing...',
+        refactor: '⚡ Refactoring...',
+    };
+    $('ai-hint-result-title').textContent = titles[action] || '🤖 Nexia AI';
+    $('ai-hint-result-status').textContent = '';
+    $('ai-hint-result-body').innerHTML = '<div class="ai-hint-loading"><div class="ai-hint-loading-dots"><span class="ai-hint-loading-dot"></span><span class="ai-hint-loading-dot"></span><span class="ai-hint-loading-dot"></span></div><span class="ai-hint-loading-label">Thinking...</span></div>';
+    $('ai-hint-result-actions').classList.add('hidden');
+}
+
+async function executeHintAction(action: string, code: string, range: any) {
+    hideHintBar();
+
+    // Position result panel near the selection
+    const editorDom = $('editor-container');
+    const editorRect = editorDom.getBoundingClientRect();
+    const coords = editor.getScrolledVisiblePosition({ lineNumber: range.endLineNumber, column: 1 });
+    const rx = editorRect.left + (coords?.left || 100);
+    const ry = editorRect.top + (coords?.top || 100) + 24;
+
+    showHintResult(rx, ry);
+    setHintResultLoading(action);
+
+    const prompts: Record<string, string> = {
+        explain: `Explain the following code. Describe what it does, its purpose, and any notable patterns or potential issues. Be concise but thorough.
+
+\`\`\`cpp
+${code}
+\`\`\``,
+
+        fix: `You are a code repair tool. Analyze the following code for bugs, errors, and issues, then provide the FIXED version.
+
+IMPORTANT: Respond using EXACTLY this format:
+<tool>fix_code</tool>
+<search>
+(the exact original code or pattern to find)
+</search>
+<replace>
+(the corrected code to replace it with)
+</replace>
+<explanation>
+(brief explanation of what was fixed and why)
+</explanation>
+
+If there are multiple fixes needed, repeat the tool block for each one.
+If no issues are found, say "No issues found" and explain why the code is correct.
+
+\`\`\`cpp
+${code}
+\`\`\``,
+
+        refactor: `You are a code refactoring tool. Improve the following code for readability, performance, or best practices while preserving its functionality.
+
+IMPORTANT: Respond using EXACTLY this format:
+<tool>refactor_code</tool>
+<mode>replace</mode>
+<code>
+(the complete refactored code that replaces the selection)
+</code>
+<explanation>
+(brief explanation of what was changed and why)
+</explanation>
+
+\`\`\`cpp
+${code}
+\`\`\``,
+    };
+
+    try {
+        const reply = await aiComplete([{ role: 'user', content: prompts[action] }]);
+
+        const titleLabels: Record<string, string> = {
+            explain: '📖 Explanation',
+            fix: '🔧 Auto Fix',
+            refactor: '⚡ Refactored',
+        };
+        $('ai-hint-result-title').textContent = titleLabels[action] || '🤖 Nexia AI';
+
+        if (action === 'explain') {
+            // Explain — just render markdown, no apply button
+            $('ai-hint-result-body').innerHTML = renderMarkdown(reply);
+            addCopyButtonsToCodeBlocks($('ai-hint-result-body'));
+            $('ai-hint-result-actions').classList.add('hidden');
+            hintResultData = { action, code, result: reply };
+            $('ai-hint-result-status').textContent = '';
+            // Show copy only
+            $('ai-hint-result-actions').classList.remove('hidden');
+            ($('ai-hint-apply') as HTMLElement).style.display = 'none';
+            ($('ai-hint-reject') as HTMLElement).style.display = 'none';
+
+        } else if (action === 'fix') {
+            // Parse fix_code tool calls
+            const fixes = parseFixToolCalls(reply);
+            if (fixes.length > 0) {
+                renderFixResult(fixes, code);
+                hintResultData = { action, code, result: JSON.stringify(fixes) };
+            } else {
+                // No structured tool call — show as markdown
+                $('ai-hint-result-body').innerHTML = renderMarkdown(reply);
+                addCopyButtonsToCodeBlocks($('ai-hint-result-body'));
+                $('ai-hint-result-actions').classList.add('hidden');
+                hintResultData = { action, code, result: reply };
+            }
+
+        } else if (action === 'refactor') {
+            // Parse refactor_code tool call
+            const refactored = parseRefactorToolCall(reply);
+            if (refactored) {
+                renderRefactorResult(code, refactored.code, refactored.explanation);
+                hintResultData = { action, code, result: refactored.code };
+            } else {
+                $('ai-hint-result-body').innerHTML = renderMarkdown(reply);
+                addCopyButtonsToCodeBlocks($('ai-hint-result-body'));
+                $('ai-hint-result-actions').classList.add('hidden');
+                hintResultData = { action, code, result: reply };
+            }
+        }
+
+    } catch (err: any) {
+        $('ai-hint-result-title').textContent = '❌ Error';
+        $('ai-hint-result-body').innerHTML = `<p style="color:var(--red)">${err.message}</p>`;
+        $('ai-hint-result-actions').classList.add('hidden');
+    }
+}
+
+// ── Tool call parsers ──
+
+interface FixCall { search: string; replace: string; explanation: string; }
+
+function parseFixToolCalls(text: string): FixCall[] {
+    const fixes: FixCall[] = [];
+    // Match <tool>fix_code</tool> blocks
+    const toolRegex = /<tool>\s*fix_code\s*<\/tool>\s*<search>\s*([\s\S]*?)\s*<\/search>\s*<replace>\s*([\s\S]*?)\s*<\/replace>(?:\s*<explanation>\s*([\s\S]*?)\s*<\/explanation>)?/gi;
+    let match;
+    while ((match = toolRegex.exec(text)) !== null) {
+        fixes.push({
+            search: match[1].trim(),
+            replace: match[2].trim(),
+            explanation: (match[3] || '').trim(),
+        });
+    }
+    return fixes;
+}
+
+interface RefactorResult { code: string; explanation: string; mode: string; }
+
+function parseRefactorToolCall(text: string): RefactorResult | null {
+    const regex = /<tool>\s*refactor_code\s*<\/tool>\s*(?:<mode>\s*([\s\S]*?)\s*<\/mode>\s*)?<code>\s*([\s\S]*?)\s*<\/code>(?:\s*<explanation>\s*([\s\S]*?)\s*<\/explanation>)?/i;
+    const match = regex.exec(text);
+    if (!match) return null;
+    return {
+        mode: (match[1] || 'replace').trim(),
+        code: match[2].trim(),
+        explanation: (match[3] || '').trim(),
+    };
+}
+
+// ── Result renderers ──
+
+function renderFixResult(fixes: FixCall[], originalCode: string) {
+    const body = $('ai-hint-result-body');
+    let html = `<p style="margin-bottom:8px;color:var(--text-dim);font-size:11px;">${fixes.length} fix${fixes.length > 1 ? 'es' : ''} found:</p>`;
+
+    for (let i = 0; i < fixes.length; i++) {
+        const fix = fixes[i];
+        html += `<div style="margin-bottom:10px;">`;
+        if (fix.explanation) {
+            html += `<p style="font-size:11px;color:var(--text);margin:0 0 4px;"><strong>#${i + 1}:</strong> ${fix.explanation}</p>`;
+        }
+        html += `<div class="ai-hint-diff-remove"><pre>${escapeHtml(fix.search)}</pre></div>`;
+        html += `<div class="ai-hint-diff-add"><pre>${escapeHtml(fix.replace)}</pre></div>`;
+        html += `</div>`;
+    }
+
+    body.innerHTML = html;
+    $('ai-hint-result-status').textContent = `${fixes.length} change${fixes.length > 1 ? 's' : ''}`;
+
+    // Show apply/reject
+    const actions = $('ai-hint-result-actions');
+    actions.classList.remove('hidden');
+    ($('ai-hint-apply') as HTMLElement).style.display = '';
+    ($('ai-hint-reject') as HTMLElement).style.display = '';
+}
+
+function renderRefactorResult(original: string, refactored: string, explanation: string) {
+    const body = $('ai-hint-result-body');
+    let html = '';
+    if (explanation) {
+        html += `<p style="font-size:11px;color:var(--text);margin:0 0 8px;">${explanation}</p>`;
+    }
+    html += `<div class="ai-hint-diff-remove"><pre>${escapeHtml(original)}</pre></div>`;
+    html += `<div class="ai-hint-diff-add"><pre>${escapeHtml(refactored)}</pre></div>`;
+    body.innerHTML = html;
+    $('ai-hint-result-status').textContent = 'Refactored';
+
+    const actions = $('ai-hint-result-actions');
+    actions.classList.remove('hidden');
+    ($('ai-hint-apply') as HTMLElement).style.display = '';
+    ($('ai-hint-reject') as HTMLElement).style.display = '';
+}
+
+// ── Apply changes to editor ──
+
+function applyHintResult() {
+    if (!hintResultData || !editor || !hintBarSelection) return;
+    const model = editor.getModel();
+    if (!model) return;
+
+    const { action, code, result } = hintResultData;
+    const range = hintBarSelection.range;
+
+    if (action === 'fix') {
+        // Apply fix_code tool calls — search/replace within the selection
+        const fixes: FixCall[] = JSON.parse(result);
+        let currentText = model.getValueInRange(range);
+
+        for (const fix of fixes) {
+            // Try exact string match first
+            if (currentText.includes(fix.search)) {
+                currentText = currentText.replace(fix.search, fix.replace);
+            } else {
+                // Try regex match
+                try {
+                    const regex = new RegExp(fix.search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g');
+                    currentText = currentText.replace(regex, fix.replace);
+                } catch {
+                    // If regex fails, try line-by-line fuzzy match
+                    currentText = currentText.replace(fix.search.trim(), fix.replace.trim());
+                }
+            }
+        }
+
+        // Apply the edit
+        const monaco = (window as any).monaco;
+        editor.executeEdits('ai-hint-fix', [{
+            range: new monaco.Range(range.startLineNumber, range.startColumn, range.endLineNumber, range.endColumn),
+            text: currentText,
+        }]);
+
+    } else if (action === 'refactor') {
+        // Replace entire selection with refactored code
+        const monaco = (window as any).monaco;
+        editor.executeEdits('ai-hint-refactor', [{
+            range: new monaco.Range(range.startLineNumber, range.startColumn, range.endLineNumber, range.endColumn),
+            text: result,
+        }]);
+    }
+
+    hideHintResult();
+    // Mark file as modified
+    if (activeTab) {
+        const tab = openTabs.find(t => t.path === activeTab);
+        if (tab && !tab.modified) { tab.modified = true; renderTabs(); }
+    }
+}
+
+function initAI() {
+    // Mode tabs
+    document.querySelectorAll('.ai-mode-tab').forEach(tab => {
+        tab.addEventListener('click', () => switchAIMode(tab.getAttribute('data-ai-mode') || 'chat'));
+    });
+
+    // Chat input
+    const input = $('ai-input') as HTMLTextAreaElement;
+    input.addEventListener('keydown', (e: KeyboardEvent) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            const contextBadge = $('ai-context-badge');
+            const contextCode = (contextBadge as any).__contextCode || undefined;
+            sendAIMessage(input.value, contextCode);
+            input.value = '';
+            input.style.height = 'auto';
+            // Clear context
+            contextBadge.classList.add('hidden');
+            (contextBadge as any).__contextCode = null;
+        }
+    });
+    // Auto-resize textarea
+    input.addEventListener('input', () => {
+        input.style.height = 'auto';
+        input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+    });
+
+    // Send button
+    $('ai-send').addEventListener('click', () => {
+        if (aiStreaming && aiAbortStream) {
+            // Stop streaming
+            aiAbortStream();
+            aiAbortStream = null;
+            aiStreaming = false;
+            ($('ai-send') as HTMLButtonElement).disabled = false;
+    $('ai-send').textContent = '↑';
+            $('ai-send').textContent = '↑';
+            setAIStatus('connected', 'Stopped');
+            // Remove streaming badge from current message
+            const streamingMsg = document.querySelector('.ai-msg-streaming');
+            if (streamingMsg) {
+                streamingMsg.classList.remove('ai-msg-streaming');
+                const badge = streamingMsg.querySelector('.ai-msg-streaming-badge');
+                if (badge) badge.remove();
+            }
+            return;
+        }
+        const contextCode = ($('ai-context-badge') as any).__contextCode || undefined;
+        sendAIMessage(input.value, contextCode);
+        input.value = '';
+        input.style.height = 'auto';
+        $('ai-context-badge').classList.add('hidden');
+    });
+
+    // Clear button
+    $('ai-clear').addEventListener('click', clearAIChat);
+
+    // Quick action buttons
+    document.addEventListener('click', (e) => {
+        const btn = (e.target as HTMLElement).closest('.ai-quick-btn');
+        if (btn) {
+            const prompt = btn.getAttribute('data-prompt');
+            if (prompt) sendAIMessage(prompt);
+        }
+    });
+
+    // Settings
+    $('ai-settings-btn').addEventListener('click', openAISettings);
+    $('ai-settings-save').addEventListener('click', saveAISettings);
+    $('ai-settings-cancel').addEventListener('click', () => $('ai-settings-overlay').classList.add('hidden'));
+    $('ai-provider').addEventListener('change', () => { toggleCustomEndpointField(); });
+    $('ai-test-connection').addEventListener('click', testAIConnection);
+    $('ai-key-toggle').addEventListener('click', () => {
+        const inp = $('ai-api-key') as HTMLInputElement;
+        inp.type = inp.type === 'password' ? 'text' : 'password';
+        ($('ai-key-toggle') as HTMLElement).textContent = inp.type === 'password' ? 'Show' : 'Hide';
+    });
+
+    // Context clear
+    $('ai-context-clear').addEventListener('click', () => {
+        $('ai-context-badge').classList.add('hidden');
+        ($('ai-context-badge') as any).__contextCode = null;
+    });
+
+    // Generate mode
+    $('ai-gen-submit').addEventListener('click', generateAICode);
+    $('ai-gen-copy').addEventListener('click', () => {
+        navigator.clipboard.writeText($('ai-gen-code-text').textContent || '');
+        ($('ai-gen-copy') as HTMLElement).textContent = '✓ Copied';
+        setTimeout(() => ($('ai-gen-copy') as HTMLElement).textContent = '📋 Copy', 1500);
+    });
+    $('ai-gen-insert').addEventListener('click', () => {
+        const code = $('ai-gen-code-text').textContent || '';
+        if (editor && code) {
+            const pos = editor.getPosition();
+            if (pos) {
+                editor.executeEdits('ai-gen', [{ range: new (window as any).monaco.Range(pos.lineNumber, pos.column, pos.lineNumber, pos.column), text: code }]);
+            }
+        }
+    });
+    $('ai-gen-newfile').addEventListener('click', () => {
+        const code = $('ai-gen-code-text').textContent || '';
+        // Trigger new file dialog, user can paste
+        navigator.clipboard.writeText(code);
+        appendOutput('Generated code copied to clipboard. Create a new file and paste.\n');
+    });
+
+    // Inline suggestion handlers
+    $('ai-inline-accept').addEventListener('click', acceptInlineSuggestion);
+    $('ai-inline-dismiss').addEventListener('click', dismissInlineSuggestion);
+
+    // Keyboard shortcut: Ctrl+Shift+A to focus AI
+    document.addEventListener('keydown', (e: KeyboardEvent) => {
+        if (e.ctrlKey && e.shiftKey && e.key === 'A') {
+            e.preventDefault();
+            switchToAIPanel();
+            ($('ai-input') as HTMLTextAreaElement).focus();
+        }
+        // Esc to dismiss inline suggestion
+        if (e.key === 'Escape') dismissInlineSuggestion();
+        // Tab to accept inline suggestion
+        if (e.key === 'Tab' && (window as any).__aiInlineSuggestion) {
+            e.preventDefault();
+            acceptInlineSuggestion();
+        }
+    });
+
+    updateAIStatusFromSettings();
+
+    // Initialize hint bar after editor is ready
+    monacoReady.then(() => initAIHintBar());
+}
+
 async function init() {
     loadUserSettings();
     loadProfile();
@@ -5388,8 +6496,8 @@ async function init() {
     renderLearnPanel();
     renderTipsPanel();
     renderStudyPanel();
-    renderTutorialsPanel();
     renderCommunityPanel();
+    initAI();
     const state = await ipcRenderer.invoke(IPC.APP_READY);
     defaultProjectsDir = state.projectsDir || '';
     await checkSetup(state);

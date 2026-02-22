@@ -28,11 +28,25 @@
 - **Multi-file selection** — import multiple files at once.
 - **Hide project config files** — nexia.json and nexia-workspace.json hidden from the file explorer by default.
 
-### Fixes
+### Bug Fixes
 - Fixed UTF-8 encoding corruption across all source files (3,700+ mojibake sequences from cp1252 double-encoding).
 - Fixed build output double-spacing caused by trailing newline handling in `appendOutput()`.
 - Fixed copyright symbol mojibake in package.json.
 - Removed auto-generated assets folder from new projects.
+- Fixed `getSystemInfo` sending the XBDM command repeatedly due to missing `sentCommand` guard, causing duplicate commands and wasted bandwidth.
+- Fixed `listVolumes` using a blind `setTimeout` instead of detecting the XBDM end-of-response marker (`\r\n.\r\n`), improving reliability on slow connections and removing unnecessary delay on fast ones.
+- Fixed hardcoded `project:export` and `project:import` IPC strings — added `PROJECT_EXPORT` and `PROJECT_IMPORT` to the `IPC` constants object and updated all references.
+- Fixed `elapsed()` centisecond calculation displaying incorrect values (e.g. 5ms showing as 50cs).
+- Moved `guildId` declaration to the top of the Discord class with other private fields for clarity.
+
+### Security Fixes
+- Fixed command injection vulnerability in project export/import — replaced `execSync` with `execFile` + argument arrays and added path escaping.
+- Fixed command injection vulnerability in extension zip extraction — added single-quote escaping for PowerShell paths.
+- Added URL validation for Discord download handler, restricting downloads to `cdn.discordapp.com` and `media.discordapp.net`.
+- Replaced `mainWindow!` non-null assertions with proper null checks to prevent crashes during shutdown or before window creation.
+
+### Reliability Fixes
+- Added `console.error()` logging to previously silent `catch {}` blocks in settings loading, recent projects, extension state, and installed extensions.
 
 ## v1.0.0
 

@@ -78,6 +78,7 @@ export class DiscordFeed {
     private authResolve: ((user: DiscordUser | null) => void) | null = null;
     private static OAUTH_PORT = 18293;
     private static REDIRECT_URI = `http://localhost:${DiscordFeed.OAUTH_PORT}/callback`;
+    private guildId: string | null = null;
 
     constructor(config?: Partial<DiscordConfig>) {
         this.config = {
@@ -385,8 +386,6 @@ export class DiscordFeed {
             return this.cache?.threads || [];
         }
     }
-
-    private guildId: string | null = null;
 
     /**
      * Get the guild ID from the forum channel (cached after first call).
