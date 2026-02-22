@@ -65,7 +65,9 @@ export class ExtensionManager {
             if (fs.existsSync(this.stateFile)) {
                 return JSON.parse(fs.readFileSync(this.stateFile, 'utf-8'));
             }
-        } catch {}
+        } catch (e) {
+            console.error('Failed to load extensions state:', e);
+        }
         return { extensions: {} };
     }
 
@@ -100,9 +102,13 @@ export class ExtensionManager {
                         enabled: stateEntry ? stateEntry.enabled : true,
                         installedAt: stateEntry ? stateEntry.installedAt : new Date().toISOString(),
                     });
-                } catch {}
+                } catch (e) {
+                    console.error(`Failed to parse manifest for extension "${entry.name}":`, e);
+                }
             }
-        } catch {}
+        } catch (e) {
+            console.error('Failed to scan extensions directory:', e);
+        }
         return results.sort((a, b) => a.manifest.name.localeCompare(b.manifest.name));
     }
 
@@ -286,7 +292,7 @@ export class ExtensionManager {
         return new Promise((resolve, reject) => {
             const ps = spawn('powershell.exe', [
                 '-NoProfile', '-NonInteractive',
-                '-Command', `Expand-Archive -Path '${zipPath}' -DestinationPath '${destDir}' -Force`
+                '-Command', `Expand-Archive -Path '${zipPath.replace(/'/g, "''")}' -DestinationPath '${destDir.replace(/'/g, "''")}' -Force`
             ], { windowsHide: true });
             let stderr = '';
             ps.stderr.on('data', (d) => { stderr += d.toString(); });

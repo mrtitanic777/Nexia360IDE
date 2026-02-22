@@ -38,13 +38,6 @@ export interface ProjectConfig {
     defines: string[];
     configuration: 'Debug' | 'Release' | 'Profile';
     pchHeader?: string;  // Precompiled header name, e.g. "stdafx.h"
-
-    // Compiler options
-    enableRTTI?: boolean;            // /GR vs /GR- (default: false)
-    exceptionHandling?: 'EHsc' | 'EHs' | 'EHa' | 'off';  // default: EHsc
-    warningLevel?: 0 | 1 | 2 | 3 | 4;   // /W0-/W4 (default: 3)
-    additionalCompilerFlags?: string;     // Free-form extra cl.exe flags
-    additionalLinkerFlags?: string;       // Free-form extra link.exe flags
 }
 
 export interface ProjectTemplate {
@@ -114,6 +107,8 @@ export const IPC = {
     PROJECT_SAVE: 'project:save',
     PROJECT_GET_CONFIG: 'project:getConfig',
     PROJECT_GET_TEMPLATES: 'project:getTemplates',
+    PROJECT_EXPORT: 'project:export',
+    PROJECT_IMPORT: 'project:import',
 
     // Files
     FILE_READ: 'file:read',
@@ -163,7 +158,6 @@ export const IPC = {
     DEVKIT_REBOOT: 'devkit:reboot',
     DEVKIT_SCREENSHOT: 'devkit:screenshot',
     DEVKIT_FILE_MANAGER: 'devkit:fileManager',
-    DEVKIT_COPY_TO: 'devkit:copyTo',
     DEVKIT_STATUS: 'devkit:status',
 
     // Emulator
@@ -187,6 +181,9 @@ export const IPC = {
 
     // App
     APP_GET_RECENT: 'app:getRecent',
+
+    // XEX Inspector
+    XEX_INSPECT: 'xex:inspect',
     APP_REMOVE_RECENT: 'app:removeRecent',
     APP_SHOW_SETUP: 'app:showSetup',
     APP_READY: 'app:ready',

@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' 'unsafe-eval' file: data:; script-src 'self' 'unsafe-inline' 'unsafe-eval' file:; style-src 'self' 'unsafe-inline' file:; font-src 'self' file: data:; img-src 'self' file: data: https://img.youtube.com; frame-src https://www.youtube.com https://www.youtube-nocookie.com;">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' 'unsafe-eval' file: data:; script-src 'self' 'unsafe-inline' 'unsafe-eval' file:; style-src 'self' 'unsafe-inline' file:; font-src 'self' file: data:; img-src 'self' file: data:; connect-src 'self' https: http:;">
     <title>Nexia IDE</title>
     <link rel="stylesheet" href="styles/main.css">
 </head>
@@ -70,8 +70,6 @@
                 <button class="menu-option" id="menu-rebuild"><span>Rebuild</span><span class="menu-shortcut">Ctrl+Shift+B</span></button>
                 <button class="menu-option" id="menu-clean"><span>Clean</span></button>
                 <div class="menu-divider"></div>
-                <button class="menu-option" id="menu-project-properties"><span>Project Properties...</span></button>
-                <div class="menu-divider"></div>
                 <button class="menu-option" id="menu-deploy"><span>Deploy to Devkit</span></button>
             </div>
         </div>
@@ -83,6 +81,7 @@
                 <div class="menu-divider"></div>
                 <button class="menu-option" id="menu-extensions"><span>Extensions</span></button>
                 <button class="menu-option" id="menu-sdk-tools"><span>SDK Tools</span></button>
+                <button class="menu-option" id="menu-xex-inspector"><span>Inspect XEX...</span></button>
                 <button class="menu-option" id="menu-settings"><span>Settings</span></button>
             </div>
         </div>
@@ -110,12 +109,12 @@
             <div id="sidebar-tabs">
                 <button class="sidebar-tab active" data-panel="explorer" title="Explorer">📁</button>
                 <button class="sidebar-tab" data-panel="search" title="Find in Files (Ctrl+Shift+F)">🔍</button>
+                <button class="sidebar-tab" data-panel="ai" title="Nexia AI (Ctrl+Shift+A)">🤖</button>
                 <button class="sidebar-tab" data-panel="extensions" title="Extensions">🧩</button>
                 <button class="sidebar-tab" data-panel="devkit" title="Devkit">📡</button>
                 <button class="sidebar-tab" data-panel="emulator" title="Emulator">🎮</button>
                 <button class="sidebar-tab" data-panel="learn" title="Learn">🎓</button>
                 <button class="sidebar-tab" data-panel="study" title="Study & Quizzes">📝</button>
-                <button class="sidebar-tab" data-panel="tutorials" title="Tutorials">🎬</button>
                 <button class="sidebar-tab" data-panel="community" title="Community">💬</button>
             </div>
             <div id="sidebar-content">
@@ -134,15 +133,12 @@
                 <div id="panel-search" class="sidebar-panel">
                     <div class="panel-header">SEARCH</div>
                     <div id="search-panel" class="panel-body">
-                        <div style="padding:8px 12px;">
+                        <div class="search-panel-inner">
                             <div class="search-input-row">
                                 <input type="text" id="search-query" placeholder="Search in files..." spellcheck="false" autocomplete="off">
                             </div>
-                            <div class="search-input-row" style="margin-top:4px;">
-                                <input type="text" id="search-replace" placeholder="Replace with..." spellcheck="false" autocomplete="off" class="hidden">
-                            </div>
-                            <div id="replace-actions" class="hidden" style="display:none; margin-top:4px; gap:4px; padding:0 0;">
-                                <button id="btn-replace-all" class="search-action-btn" title="Replace All">Replace All</button>
+                            <div class="search-input-row search-input-gap">
+                                <input type="text" id="search-replace" placeholder="Replace" spellcheck="false" autocomplete="off" class="hidden">
                             </div>
                             <div class="search-options">
                                 <label class="search-opt" title="Match Case">
@@ -155,8 +151,8 @@
                                     <input type="checkbox" id="search-show-replace"> ↔
                                 </label>
                             </div>
-                            <div class="search-input-row" style="margin-top:4px;">
-                                <input type="text" id="search-include" placeholder="Include: *.cpp, *.h" spellcheck="false" autocomplete="off" style="font-size:11px;">
+                            <div class="search-input-row search-input-gap">
+                                <input type="text" id="search-include" placeholder="Include: *.cpp, *.h" spellcheck="false" autocomplete="off" class="search-include-input">
                             </div>
                             <div id="search-summary" class="search-summary"></div>
                         </div>
@@ -166,6 +162,108 @@
                 <div id="panel-extensions" class="sidebar-panel">
                     <div class="panel-header">EXTENSIONS</div>
                     <div id="extensions-panel" class="panel-body"></div>
+                </div>
+
+                <!-- AI Assistant Panel -->
+                <div id="panel-ai" class="sidebar-panel">
+                    <div class="panel-header">
+                        <span>NEXIA AI</span>
+                        <div class="panel-actions">
+                            <button class="panel-action-btn" id="ai-clear" title="Clear Chat">🗑</button>
+                            <button class="panel-action-btn" id="ai-settings-btn" title="AI Settings">⚙</button>
+                        </div>
+                    </div>
+                    <div id="ai-panel" class="panel-body">
+                        <!-- Mode tabs -->
+                        <div id="ai-mode-bar">
+                            <button class="ai-mode-tab active" data-ai-mode="chat">💬 Chat</button>
+                            <button class="ai-mode-tab" data-ai-mode="generate">⚡ Generate</button>
+                            <button class="ai-mode-tab" data-ai-mode="errors">🔴 Errors</button>
+                        </div>
+
+                        <!-- Status bar -->
+                        <div id="ai-status">
+                            <span id="ai-status-dot" class="ai-dot disconnected"></span>
+                            <span id="ai-status-text">No API key configured</span>
+                            <span id="ai-provider-label"></span>
+                        </div>
+
+                        <!-- Chat mode -->
+                        <div id="ai-chat-view" class="ai-view active">
+                            <div id="ai-messages">
+                                <div class="ai-welcome">
+                                    <div class="ai-welcome-icon">🤖</div>
+                                    <div class="ai-welcome-title">Nexia AI</div>
+                                    <div class="ai-welcome-desc">Your Xbox 360 development assistant. Ask questions about XDK APIs, debug build errors, or generate code.</div>
+                                    <div class="ai-quick-actions">
+                                        <button class="ai-quick-btn" data-prompt="Explain the Xbox 360 D3D initialization process">📖 D3D Init Guide</button>
+                                        <button class="ai-quick-btn" data-prompt="Show me a basic Xbox 360 input polling loop">🎮 Input Polling</button>
+                                        <button class="ai-quick-btn" data-prompt="How do I set up audio using XAudio2 on Xbox 360?">🔊 Audio Setup</button>
+                                        <button class="ai-quick-btn" data-prompt="What are common Xbox 360 build errors and how to fix them?">🔧 Build Errors</button>
+                                    </div>
+                                </div>
+                            </div>
+                            <div id="ai-input-area">
+                                <div id="ai-context-badge" class="hidden">
+                                    <span id="ai-context-text"></span>
+                                    <button id="ai-context-clear" title="Remove context">✕</button>
+                                </div>
+                                <div id="ai-input-row">
+                                    <textarea id="ai-input" placeholder="Ask about Xbox 360 development..." rows="1" spellcheck="false"></textarea>
+                                    <button id="ai-send" title="Send (Enter)">↑</button>
+                                </div>
+                                <div id="ai-input-hint">Enter to send · Shift+Enter for newline · Ctrl+Shift+A to focus</div>
+                            </div>
+                        </div>
+
+                        <!-- Generate mode -->
+                        <div id="ai-generate-view" class="ai-view">
+                            <div class="ai-generate-inner">
+                                <div class="ai-gen-header">
+                                    <div class="ai-gen-icon">⚡</div>
+                                    <h3>Code Generator</h3>
+                                    <p>Describe what you want in plain English and Nexia AI will generate Xbox 360 C++ code.</p>
+                                </div>
+                                <textarea id="ai-gen-prompt" placeholder="Example: Create a function that loads a texture from a file and applies it to a 3D quad..." rows="4" spellcheck="false"></textarea>
+                                <div id="ai-gen-options">
+                                    <label class="ai-gen-opt">
+                                        <input type="checkbox" id="ai-gen-comments" checked> Add comments
+                                    </label>
+                                    <label class="ai-gen-opt">
+                                        <input type="checkbox" id="ai-gen-includes"> Include #includes
+                                    </label>
+                                    <label class="ai-gen-opt">
+                                        <input type="checkbox" id="ai-gen-error-handling"> Error handling
+                                    </label>
+                                </div>
+                                <button id="ai-gen-submit" class="ai-gen-btn">⚡ Generate Code</button>
+                                <div id="ai-gen-result" class="hidden">
+                                    <div id="ai-gen-result-header">
+                                        <span>Generated Code</span>
+                                        <div class="ai-gen-result-actions">
+                                            <button id="ai-gen-copy" class="ai-gen-action">📋 Copy</button>
+                                            <button id="ai-gen-insert" class="ai-gen-action">📥 Insert at Cursor</button>
+                                            <button id="ai-gen-newfile" class="ai-gen-action">📄 New File</button>
+                                        </div>
+                                    </div>
+                                    <pre id="ai-gen-code"><code id="ai-gen-code-text"></code></pre>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Error analysis mode -->
+                        <div id="ai-errors-view" class="ai-view">
+                            <div id="ai-errors-empty">
+                                <div class="ai-errors-icon">✅</div>
+                                <div class="ai-errors-title">No Build Errors</div>
+                                <div class="ai-errors-desc">When a build fails, Nexia AI will automatically analyze the errors and suggest fixes.</div>
+                            </div>
+                            <div id="ai-errors-content" class="hidden">
+                                <div id="ai-errors-summary"></div>
+                                <div id="ai-errors-list"></div>
+                            </div>
+                        </div>
+                    </div>
                 </div>
                 <div id="panel-devkit" class="sidebar-panel">
                     <div class="panel-header">DEVKIT</div>
@@ -183,10 +281,6 @@
                     <div class="panel-header">STUDY</div>
                     <div id="study-panel" class="panel-body"></div>
                 </div>
-                <div id="panel-tutorials" class="sidebar-panel">
-                    <div class="panel-header">TUTORIALS</div>
-                    <div id="tutorials-panel" class="panel-body"></div>
-                </div>
                 <div id="panel-community" class="sidebar-panel">
                     <div class="panel-header">COMMUNITY</div>
                     <div id="community-panel" class="panel-body"></div>
@@ -198,6 +292,9 @@
 
         <div id="editor-area">
             <div id="tab-bar"></div>
+            <div id="breadcrumb-bar" class="hidden">
+                <div id="breadcrumb-path"></div>
+            </div>
             <div id="editor-container"></div>
             <div id="welcome-screen">
                 <div id="welcome-content">
@@ -331,29 +428,29 @@
     </div>
 
     <div id="ext-import-overlay" class="overlay hidden">
-        <div id="ext-import-dialog" class="dialog-box" style="width:480px;">
+        <div id="ext-import-dialog" class="dialog-box dialog-sm">
             <h2>🧩 Import Extension</h2>
-            <p style="color:var(--text-dim);margin:8px 0 16px;">Import an extension from a .zip file or folder. Extensions must contain a <code>manifest.json</code>.</p>
-            <div class="dialog-buttons" style="flex-direction:column;gap:8px;">
-                <button id="ext-import-zip" class="setup-btn-primary" style="width:100%;">📦 Import from .zip</button>
-                <button id="ext-import-folder" class="setup-btn" style="width:100%;">📁 Import from Folder</button>
-                <button id="ext-create-new" class="setup-btn-secondary" style="width:100%;">✨ Create New Extension</button>
-                <div class="menu-divider" style="margin:4px 0;"></div>
-                <button id="ext-import-close" class="setup-btn-secondary" style="width:100%;">Cancel</button>
+            <p class="dialog-desc">Import an extension from a .zip file or folder. Extensions must contain a <code>manifest.json</code>.</p>
+            <div class="dialog-buttons dialog-buttons-stack">
+                <button id="ext-import-zip" class="setup-btn-primary btn-full">📦 Import from .zip</button>
+                <button id="ext-import-folder" class="setup-btn btn-full">📁 Import from Folder</button>
+                <button id="ext-create-new" class="setup-btn-secondary btn-full">✨ Create New Extension</button>
+                <div class="menu-divider dialog-divider"></div>
+                <button id="ext-import-close" class="setup-btn-secondary btn-full">Cancel</button>
             </div>
         </div>
     </div>
 
     <div id="ext-create-overlay" class="overlay hidden">
-        <div id="ext-create-dialog" class="dialog-box" style="width:420px;">
+        <div id="ext-create-dialog" class="dialog-box dialog-xs">
             <h2>✨ Create Extension</h2>
             <div class="dialog-field">
                 <label>Extension Name</label>
-                <input type="text" id="ext-create-name" placeholder="My Extension" style="width:100%;padding:8px;background:var(--bg-dark);border:1px solid var(--text-dim);color:var(--text);border-radius:4px;">
+                <input type="text" id="ext-create-name" placeholder="My Extension">
             </div>
-            <div class="dialog-field" style="margin-top:12px;">
+            <div class="dialog-field">
                 <label>Type</label>
-                <select id="ext-create-type" style="width:100%;padding:8px;background:var(--bg-dark);border:1px solid var(--text-dim);color:var(--text);border-radius:4px;">
+                <select id="ext-create-type" class="dialog-select">
                     <option value="tool">🔧 Tool</option>
                     <option value="template">📋 Template</option>
                     <option value="snippet">✂ Snippet</option>
@@ -362,7 +459,7 @@
                     <option value="plugin">🔌 Plugin</option>
                 </select>
             </div>
-            <div class="dialog-buttons" style="margin-top:16px;">
+            <div class="dialog-buttons">
                 <button id="ext-create-cancel" class="setup-btn-secondary">Cancel</button>
                 <button id="ext-create-submit" class="setup-btn-primary">Create</button>
             </div>
@@ -370,7 +467,7 @@
     </div>
 
     <div id="new-file-overlay" class="overlay hidden">
-        <div id="new-file-dialog" style="width:420px;">
+        <div id="new-file-dialog" class="dialog-xs">
             <h2>New File</h2>
             <div class="dialog-field">
                 <label>File Name (with extension):</label>
@@ -389,20 +486,6 @@
             <h2>⚙ Settings</h2>
 
             <div class="settings-section">
-                <h3>Explorer</h3>
-                <div class="settings-row">
-                    <label>Show Hidden Files</label>
-                    <label class="toggle-switch">
-                        <input type="checkbox" id="setting-show-hidden-files">
-                        <span class="toggle-slider"></span>
-                    </label>
-                </div>
-                <p style="font-size:11px; color:var(--text-dim); margin-top:4px; line-height:1.5;">
-                    Show project configuration files like nexia.json in the file explorer.
-                </p>
-            </div>
-
-            <div class="settings-section">
                 <h3>Editor</h3>
                 <div class="settings-row">
                     <label>Font Size</label>
@@ -419,7 +502,7 @@
                         <span class="toggle-slider"></span>
                     </label>
                 </div>
-                <p style="font-size:11px; color:var(--text-dim); margin-top:4px; line-height:1.5;">
+                <p class="settings-desc">
                     Glassmorphism, glow effects, animations, floating orbs, and decorative shadows. Turn off for a clean, flat look.
                 </p>
             </div>
@@ -429,35 +512,35 @@
                 <div class="settings-color-grid">
                     <div class="settings-row">
                         <label>Accent Color</label>
-                        <input type="color" data-setting="accentColor" value="#00e676">
+                        <input type="color" data-setting="accentColor" value="#4ec9b0">
                     </div>
                     <div class="settings-row">
                         <label>Background (Dark)</label>
-                        <input type="color" data-setting="bgDark" value="#0d0d1a">
+                        <input type="color" data-setting="bgDark" value="#181818">
                     </div>
                     <div class="settings-row">
                         <label>Background (Main)</label>
-                        <input type="color" data-setting="bgMain" value="#1a1a2e">
+                        <input type="color" data-setting="bgMain" value="#1e1e1e">
                     </div>
                     <div class="settings-row">
                         <label>Panel Background</label>
-                        <input type="color" data-setting="bgPanel" value="#16213e">
+                        <input type="color" data-setting="bgPanel" value="#1e1e1e">
                     </div>
                     <div class="settings-row">
                         <label>Sidebar Background</label>
-                        <input type="color" data-setting="bgSidebar" value="#0f1526">
+                        <input type="color" data-setting="bgSidebar" value="#252526">
                     </div>
                     <div class="settings-row">
                         <label>Editor Background</label>
-                        <input type="color" data-setting="editorBg" value="#1a1a2e">
+                        <input type="color" data-setting="editorBg" value="#1e1e1e">
                     </div>
                     <div class="settings-row">
                         <label>Text Color</label>
-                        <input type="color" data-setting="textColor" value="#e0e0e0">
+                        <input type="color" data-setting="textColor" value="#cccccc">
                     </div>
                     <div class="settings-row">
                         <label>Text (Dim)</label>
-                        <input type="color" data-setting="textDim" value="#8888aa">
+                        <input type="color" data-setting="textDim" value="#858585">
                     </div>
                 </div>
             </div>
@@ -474,70 +557,13 @@
                 </div>
             </div>
 
-            <div class="dialog-buttons" style="margin-top:20px;">
+            <div class="dialog-buttons">
                 <button id="settings-open-setup" class="setup-btn">SDK Setup...</button>
                 <button id="settings-retake-tour" class="setup-btn">Retake UI Tour</button>
                 <button id="settings-reset" class="setup-btn-secondary">Reset Theme</button>
-                <button id="settings-reset-learning" class="setup-btn-secondary" style="color:#ffc107;">Reset Learning Progress</button>
-                <button id="settings-factory-reset" class="setup-btn-secondary" style="color:#f44336;">Factory Reset</button>
+                <button id="settings-reset-learning" class="setup-btn-secondary btn-warn">Reset Learning Progress</button>
+                <button id="settings-factory-reset" class="setup-btn-secondary btn-danger">Factory Reset</button>
                 <button id="settings-close" class="setup-btn-primary">Done</button>
-            </div>
-        </div>
-    </div>
-
-    <!-- Project Properties Dialog -->
-    <div id="project-props-overlay" class="overlay hidden">
-        <div id="project-props-dialog" style="max-width:520px;">
-            <h2>⚙ Project Properties</h2>
-
-            <div class="settings-section">
-                <h3>C/C++ Compiler</h3>
-                <div class="settings-row">
-                    <label>Enable RTTI (/GR)</label>
-                    <label class="toggle-switch">
-                        <input type="checkbox" id="pp-enable-rtti">
-                        <span class="toggle-slider"></span>
-                    </label>
-                </div>
-                <p style="font-size:10px; color:var(--text-dim); margin-top:2px; line-height:1.4;">
-                    Enables Run-Time Type Information. Required for dynamic_cast and typeid on polymorphic types.
-                </p>
-                <div class="settings-row" style="margin-top:10px;">
-                    <label>Exception Handling</label>
-                    <select id="pp-exception-handling" style="background:var(--bg-dark); color:var(--text); border:1px solid rgba(255,255,255,0.1); border-radius:4px; padding:4px 8px; font-size:12px;">
-                        <option value="EHsc">/EHsc — C++ only, extern C nothrow</option>
-                        <option value="EHs">/EHs — C++ only</option>
-                        <option value="EHa">/EHa — C++ and structured (SEH)</option>
-                        <option value="off">Disabled</option>
-                    </select>
-                </div>
-                <div class="settings-row" style="margin-top:10px;">
-                    <label>Warning Level</label>
-                    <select id="pp-warning-level" style="background:var(--bg-dark); color:var(--text); border:1px solid rgba(255,255,255,0.1); border-radius:4px; padding:4px 8px; font-size:12px;">
-                        <option value="0">/W0 — Disable all warnings</option>
-                        <option value="1">/W1 — Severe warnings only</option>
-                        <option value="2">/W2 — Significant warnings</option>
-                        <option value="3" selected>/W3 — Production quality (default)</option>
-                        <option value="4">/W4 — Informational warnings</option>
-                    </select>
-                </div>
-                <div class="settings-row" style="margin-top:10px;">
-                    <label>Additional Compiler Flags</label>
-                    <input type="text" id="pp-extra-cl-flags" placeholder="e.g. /Zp8 /favor:XBOX360" style="flex:1; background:var(--bg-dark); color:var(--text); border:1px solid rgba(255,255,255,0.1); border-radius:4px; padding:4px 8px; font-family:var(--mono); font-size:11px;">
-                </div>
-            </div>
-
-            <div class="settings-section">
-                <h3>Linker</h3>
-                <div class="settings-row">
-                    <label>Additional Linker Flags</label>
-                    <input type="text" id="pp-extra-link-flags" placeholder="e.g. /LTCG /STACK:0x40000" style="flex:1; background:var(--bg-dark); color:var(--text); border:1px solid rgba(255,255,255,0.1); border-radius:4px; padding:4px 8px; font-family:var(--mono); font-size:11px;">
-                </div>
-            </div>
-
-            <div class="dialog-buttons" style="margin-top:20px;">
-                <button id="pp-cancel" class="setup-btn-secondary">Cancel</button>
-                <button id="pp-save" class="setup-btn-primary">Save</button>
             </div>
         </div>
     </div>
@@ -619,7 +645,7 @@
 
     <!-- Quiz Dialog -->
     <div id="quiz-overlay" class="overlay hidden">
-        <div id="quiz-dialog" class="dialog-box" style="width:560px;">
+        <div id="quiz-dialog" class="dialog-box dialog-md">
             <div class="dialog-header">
                 <h2 id="quiz-title">📝 Quiz</h2>
                 <span id="quiz-progress">1 / 10</span>
@@ -629,9 +655,9 @@
                 <div id="quiz-mode-mc" class="quiz-mode">
                     <div id="quiz-options"></div>
                 </div>
-                <div id="quiz-mode-fill" class="quiz-mode" style="display:none;">
+                <div id="quiz-mode-fill" class="quiz-mode hidden">
                     <input type="text" id="quiz-fill-input" class="quiz-fill-input" placeholder="Type your answer..." autocomplete="off">
-                    <button id="quiz-fill-submit" class="ob-btn-primary" style="margin-top:10px;">Submit Answer</button>
+                    <button id="quiz-fill-submit" class="ob-btn-primary quiz-fill-submit">Submit Answer</button>
                 </div>
                 <div id="quiz-feedback" class="quiz-feedback hidden"></div>
                 <div id="quiz-ref" class="quiz-ref hidden">
@@ -649,7 +675,7 @@
 
     <!-- Flashcard Viewer -->
     <div id="flashcard-overlay" class="overlay hidden">
-        <div id="flashcard-dialog" class="dialog-box" style="width:480px;">
+        <div id="flashcard-dialog" class="dialog-box dialog-sm">
             <div class="dialog-header">
                 <h2>🃏 Flashcards</h2>
                 <span id="fc-progress">1 / 0</span>
@@ -678,7 +704,7 @@
 
     <!-- Study Notes Editor -->
     <div id="notes-overlay" class="overlay hidden">
-        <div id="notes-dialog" class="dialog-box" style="width:600px;">
+        <div id="notes-dialog" class="dialog-box dialog-lg">
             <div class="dialog-header">
                 <h2>📓 Study Notes</h2>
             </div>
@@ -716,6 +742,113 @@
                 <button id="tour-skip" class="tour-btn tour-btn-dim">Skip Tour</button>
                 <button id="tour-next" class="tour-btn tour-btn-primary">Next →</button>
             </div>
+        </div>
+    </div>
+
+    <!-- AI Settings Dialog -->
+    <div id="ai-settings-overlay" class="overlay hidden">
+        <div id="ai-settings-dialog" class="dialog-box dialog-md">
+            <h2>🤖 AI Settings</h2>
+            <div class="dialog-field">
+                <label>AI Provider</label>
+                <select id="ai-provider" class="dialog-select">
+                    <option value="anthropic">Anthropic (Claude)</option>
+                    <option value="openai">OpenAI (GPT)</option>
+                    <option value="local">Local / Ollama</option>
+                    <option value="custom">Custom Endpoint</option>
+                </select>
+            </div>
+            <div class="dialog-field">
+                <label>API Key</label>
+                <div class="ai-key-row">
+                    <input type="password" id="ai-api-key" placeholder="sk-... or your API key">
+                    <button id="ai-key-toggle" class="setup-btn">Show</button>
+                </div>
+            </div>
+            <div id="ai-custom-endpoint" class="dialog-field hidden">
+                <label>Custom API Endpoint</label>
+                <input type="text" id="ai-endpoint-url" placeholder="http://localhost:11434/v1/chat/completions">
+            </div>
+            <div class="dialog-field">
+                <label>Model</label>
+                <input type="text" id="ai-model" placeholder="Leave blank for default (e.g. gpt-4o, claude-sonnet-4-20250514, llama3)">
+            </div>
+            <div class="dialog-field">
+                <label>System Context</label>
+                <textarea id="ai-system-prompt" class="dialog-textarea" rows="3" placeholder="Custom instructions for the AI (optional). The Xbox 360 development context is always included."></textarea>
+            </div>
+            <div class="settings-section">
+                <h3>Behavior</h3>
+                <div class="settings-row">
+                    <label>Auto-analyze build errors</label>
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="ai-auto-errors" checked>
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+                <div class="settings-row">
+                    <label>Inline code suggestions</label>
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="ai-inline-suggest">
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+                <div class="settings-row">
+                    <label>Include open file as context</label>
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="ai-file-context" checked>
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+            </div>
+            <div class="dialog-buttons">
+                <button id="ai-test-connection" class="setup-btn">🔌 Test Connection</button>
+                <button id="ai-settings-cancel" class="setup-btn-secondary">Cancel</button>
+                <button id="ai-settings-save" class="setup-btn-primary">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- AI Selection Hint Bar (floats above selected text in editor) -->
+    <div id="ai-hint-bar" class="ai-hint-bar hidden">
+        <button class="ai-hint-btn" data-action="explain" title="Explain this code">
+            <span class="ai-hint-icon">📖</span> Explain
+        </button>
+        <div class="ai-hint-sep"></div>
+        <button class="ai-hint-btn" data-action="fix" title="Auto-fix issues">
+            <span class="ai-hint-icon">🔧</span> Auto Fix
+        </button>
+        <div class="ai-hint-sep"></div>
+        <button class="ai-hint-btn" data-action="refactor" title="Refactor / improve">
+            <span class="ai-hint-icon">⚡</span> Refactor
+        </button>
+    </div>
+
+    <!-- AI Hint Result Panel (shows LLM response inline near selection) -->
+    <div id="ai-hint-result" class="ai-hint-result hidden">
+        <div class="ai-hint-result-header">
+            <span id="ai-hint-result-title">🤖 Nexia AI</span>
+            <span id="ai-hint-result-status"></span>
+            <button id="ai-hint-result-close" class="ai-hint-result-close" title="Close">✕</button>
+        </div>
+        <div id="ai-hint-result-body" class="ai-hint-result-body"></div>
+        <div id="ai-hint-result-actions" class="ai-hint-result-actions hidden">
+            <button id="ai-hint-apply" class="ai-hint-apply-btn">✓ Apply Changes</button>
+            <button id="ai-hint-reject" class="ai-hint-reject-btn">✕ Reject</button>
+            <button id="ai-hint-copy" class="ai-hint-copy-btn">📋 Copy</button>
+        </div>
+    </div>
+
+    <!-- AI Inline Suggestion Widget (floats near cursor in editor) -->
+    <div id="ai-inline-widget" class="ai-inline-widget hidden">
+        <div class="ai-inline-header">
+            <span class="ai-inline-label">🤖 Nexia AI</span>
+            <span class="ai-inline-shortcut">Tab to accept · Esc to dismiss</span>
+        </div>
+        <pre class="ai-inline-code"><code id="ai-inline-text"></code></pre>
+        <div class="ai-inline-actions">
+            <button id="ai-inline-accept" class="ai-inline-btn ai-inline-accept-btn">✓ Accept (Tab)</button>
+            <button id="ai-inline-dismiss" class="ai-inline-btn">✕ Dismiss (Esc)</button>
         </div>
     </div>
 

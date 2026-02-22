@@ -164,6 +164,22 @@ export class DevkitManager {
             const socket = new net.Socket();
             let responseData = '';
             let sentCommand = false;
+            let resolved = false;
+
+            const finish = () => {
+                if (resolved) return;
+                resolved = true;
+                socket.destroy();
+                // Parse drivelist response
+                // Format: 202- multiline follows\r\ndrivename="HDD"\r\ndrivename="GAME"\r\n...\r\n.\r\n
+                const drives: string[] = [];
+                const lines = responseData.split('\r\n');
+                for (const line of lines) {
+                    const match = line.match(/drivename="([^"]+)"/i);
+                    if (match) drives.push(match[1] + ':');
+                }
+                resolve(drives.length > 0 ? drives : ['HDD:', 'GAME:', 'DVD:']);
+            };
 
             socket.setTimeout(XBDM_TIMEOUT);
 
@@ -173,23 +189,23 @@ export class DevkitManager {
                 if (!sentCommand && responseData.includes('201')) {
                     sentCommand = true;
                     socket.write('drivelist\r\n');
+                }
 
-                    setTimeout(() => {
-                        socket.destroy();
-                        // Parse drivelist response
-                        // Format: 202- multiline follows\r\ndrivename="HDD"\r\ndrivename="GAME"\r\n...\r\n.\r\n
-                        const drives: string[] = [];
-                        const lines = responseData.split('\r\n');
-                        for (const line of lines) {
-                            const match = line.match(/drivename="([^"]+)"/i);
-                            if (match) drives.push(match[1] + ':');
-                        }
-                        resolve(drives.length > 0 ? drives : ['HDD:', 'GAME:', 'DVD:']);
-                    }, 1500);
+                // Check for end of multiline response
+                if (sentCommand && responseData.includes('\r\n.\r\n')) {
+                    finish();
                 }
             });
 
-            socket.on('timeout', () => { socket.destroy(); reject(new Error('Timeout')); });
+            // Fallback timeout in case end marker is not received
+            socket.on('timeout', () => {
+                if (sentCommand && !resolved) {
+                    finish();
+                } else {
+                    socket.destroy();
+                    reject(new Error('Timeout'));
+                }
+            });
             socket.on('error', (err) => { socket.destroy(); reject(err); });
             socket.connect(XBDM_PORT, targetIp);
         });
@@ -206,7 +222,23 @@ export class DevkitManager {
             const socket = new net.Socket();
             let responseData = '';
             let sentCommand = false;
+            let resolved = false;
             const info: Record<string, string> = {};
+
+            const finish = () => {
+                if (resolved) return;
+                resolved = true;
+                // Parse multiline response
+                const lines = responseData.split('\r\n');
+                for (const line of lines) {
+                    if (line.includes('=')) {
+                        const [key, ...val] = line.replace(/^202\| /, '').split('=');
+                        if (key && val.length) info[key.trim()] = val.join('=').trim();
+                    }
+                }
+                socket.destroy();
+                resolve(info);
+            };
 
             socket.setTimeout(XBDM_TIMEOUT);
 
@@ -215,25 +247,24 @@ export class DevkitManager {
 
                 if (!sentCommand && responseData.includes('201')) {
                     sentCommand = true;
-                    // Connected, request system info
                     socket.write('systeminfo\r\n');
+                }
 
-                    setTimeout(() => {
-                        // Parse multiline response
-                        const lines = responseData.split('\r\n');
-                        for (const line of lines) {
-                            if (line.includes('=')) {
-                                const [key, ...val] = line.replace(/^202\| /, '').split('=');
-                                if (key && val.length) info[key.trim()] = val.join('=').trim();
-                            }
-                        }
-                        socket.destroy();
-                        resolve(info);
-                    }, 2000);
+                // Check for end of multiline response
+                if (sentCommand && responseData.includes('\r\n.\r\n')) {
+                    finish();
                 }
             });
 
-            socket.on('timeout', () => { socket.destroy(); reject(new Error('Timeout')); });
+            // Fallback timeout in case end marker is not received
+            socket.on('timeout', () => {
+                if (sentCommand && !resolved) {
+                    finish();
+                } else {
+                    socket.destroy();
+                    reject(new Error('Timeout'));
+                }
+            });
             socket.on('error', (err) => { socket.destroy(); reject(err); });
             socket.connect(XBDM_PORT, targetIp);
         });
