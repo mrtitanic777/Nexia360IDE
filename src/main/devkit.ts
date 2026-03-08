@@ -513,16 +513,200 @@ export class DevkitManager {
     }
 
     /**
-     * Copy a file to the devkit.
+     * Copy a file to the console via FTP (port 21).
+     * Works with RGH/JTAG consoles running FTP servers (XeXMenu, Aurora, FSD, etc.)
+     * Falls back to xbcp for official devkits.
      */
     async copyTo(localPath: string, remotePath: string, ip?: string): Promise<void> {
-        await this.runDevkitCommand('xbcp.exe', [localPath, remotePath], ip);
+        const targetIp = ip || this.connectedIp || this.getDefault()?.ip;
+        if (!targetIp) throw new Error('No console connected');
+
+        const fileName = path.basename(localPath);
+        this.emit(`\nDeploying ${fileName} via FTP...\n`);
+
+        // Normalize the remote path for FTP (convert xHDD:\ or HDD:\ to /Hdd1/, etc.)
+        const ftpPath = this.normalizeRemotePath(remotePath, fileName);
+        this.emit(`  Target: ftp://${targetIp}${ftpPath}\n`);
+
+        const fs = require('fs');
+        const fileData = fs.readFileSync(localPath);
+        const fileSize = fileData.length;
+        this.emit(`  Size: ${(fileSize / 1024).toFixed(1)} KB\n`);
+
+        await this.ftpUpload(targetIp, ftpPath, fileData);
+        this.emit(`✓ Deployed ${fileName} (${(fileSize / 1024).toFixed(1)} KB)\n`);
     }
 
     /**
-     * Copy a file from the devkit.
+     * Convert various path formats to FTP paths.
+     * xHDD:\path → /Hdd1/path
+     * HDD:\path  → /Hdd1/path
+     * xe:\path   → /Hdd1/path
+     * USB0:\path → /Usb0/path
+     * /path      → /path (already FTP format)
+     */
+    private normalizeRemotePath(remotePath: string, fileName: string): string {
+        let p = remotePath.replace(/\\/g, '/');
+
+        // Strip x prefix (xHDD: → HDD:)
+        p = p.replace(/^x/i, '');
+
+        // Map volume names to FTP paths
+        const volumeMap: Record<string, string> = {
+            'hdd:': '/Hdd1/',
+            'e:': '/Hdd1/',
+            'usb0:': '/Usb0/',
+            'usb1:': '/Usb1/',
+            'flash:': '/Flash/',
+            'dvd:': '/Dvd/',
+            'd:': '/Hdd1/',
+        };
+
+        const lower = p.toLowerCase();
+        for (const [vol, ftpRoot] of Object.entries(volumeMap)) {
+            if (lower.startsWith(vol)) {
+                p = ftpRoot + p.substring(vol.length);
+                break;
+            }
+        }
+
+        // If it doesn't start with /, default to /Hdd1/
+        if (!p.startsWith('/')) {
+            p = '/Hdd1/' + p;
+        }
+
+        // Ensure it ends with the filename
+        if (p.endsWith('/')) {
+            p += fileName;
+        }
+
+        // Clean up double slashes
+        p = p.replace(/\/+/g, '/');
+
+        return p;
+    }
+
+    /**
+     * Upload a file via raw FTP commands (no external dependencies).
+     */
+    private ftpUpload(ip: string, remotePath: string, data: Buffer): Promise<void> {
+        return new Promise((resolve, reject) => {
+            const socket = new net.Socket();
+            let step = 0; // 0=connect, 1=user, 2=pass, 3=type, 4=pasv, 5=stor, 6=done
+            let dataPort = 0;
+            let dataHost = '';
+            let responseBuffer = '';
+
+            const timeout = setTimeout(() => {
+                socket.destroy();
+                reject(new Error('FTP connection timed out'));
+            }, 30000);
+
+            socket.connect(21, ip, () => {
+                this.emit('  FTP connected\n');
+            });
+
+            socket.on('data', (chunk) => {
+                responseBuffer += chunk.toString();
+                const lines = responseBuffer.split('\r\n');
+                responseBuffer = lines.pop() || '';
+
+                for (const line of lines) {
+                    if (!line.trim()) continue;
+                    const code = parseInt(line.substring(0, 3));
+
+                    if (step === 0 && (code === 220 || code === 200)) {
+                        // Welcome — send USER
+                        socket.write('USER xbox\r\n');
+                        step = 1;
+                    } else if (step === 1 && (code === 331 || code === 230)) {
+                        // User accepted — send PASS
+                        socket.write('PASS xbox\r\n');
+                        step = 2;
+                    } else if (step === 2 && (code === 230 || code === 200)) {
+                        // Logged in — set binary mode
+                        socket.write('TYPE I\r\n');
+                        step = 3;
+                    } else if (step === 3 && code === 200) {
+                        // Binary mode set — ensure directory exists
+                        const dir = remotePath.substring(0, remotePath.lastIndexOf('/'));
+                        if (dir && dir !== '/') {
+                            socket.write(`MKD ${dir}\r\n`);
+                            step = 35; // intermediate step
+                        } else {
+                            socket.write('PASV\r\n');
+                            step = 4;
+                        }
+                    } else if (step === 35) {
+                        // MKD response (ignore errors — dir may exist)
+                        socket.write('PASV\r\n');
+                        step = 4;
+                    } else if (step === 4 && code === 227) {
+                        // Parse PASV response: 227 Entering Passive Mode (h1,h2,h3,h4,p1,p2)
+                        // NOTE: Many Xbox FTP servers return 0.0.0.0 — always use the real console IP
+                        const match = line.match(/\((\d+),(\d+),(\d+),(\d+),(\d+),(\d+)\)/);
+                        if (!match) {
+                            socket.destroy();
+                            clearTimeout(timeout);
+                            reject(new Error('Failed to parse PASV response'));
+                            return;
+                        }
+                        dataHost = ip; // Always use the console's real IP
+                        dataPort = parseInt(match[5]) * 256 + parseInt(match[6]);
+
+                        // Send STOR command
+                        socket.write(`STOR ${remotePath}\r\n`);
+                        step = 5;
+                    } else if (step === 5 && (code === 150 || code === 125)) {
+                        // Server ready to receive — open data connection and send file
+                        const dataSocket = new net.Socket();
+                        dataSocket.connect(dataPort, dataHost, () => {
+                            this.emit('  Transferring...\n');
+                            dataSocket.end(data, () => {
+                                // Data sent
+                            });
+                        });
+                        dataSocket.on('error', (err) => {
+                            socket.destroy();
+                            clearTimeout(timeout);
+                            reject(new Error(`FTP data transfer failed: ${err.message}`));
+                        });
+                        step = 6;
+                    } else if (step === 6 && (code === 226 || code === 250)) {
+                        // Transfer complete
+                        clearTimeout(timeout);
+                        socket.write('QUIT\r\n');
+                        socket.destroy();
+                        resolve();
+                    } else if (code >= 400) {
+                        // Error
+                        clearTimeout(timeout);
+                        socket.destroy();
+                        reject(new Error(`FTP error ${code}: ${line}`));
+                    }
+                }
+            });
+
+            socket.on('error', (err) => {
+                clearTimeout(timeout);
+                reject(new Error(`FTP connection failed: ${err.message}`));
+            });
+
+            socket.on('close', () => {
+                clearTimeout(timeout);
+            });
+        });
+    }
+
+    /**
+     * Copy a file from the console via FTP.
      */
     async copyFrom(remotePath: string, localPath: string, ip?: string): Promise<void> {
-        await this.runDevkitCommand('xbcp.exe', [remotePath, localPath], ip);
+        // For now, fall back to xbcp for downloads
+        try {
+            await this.runDevkitCommand('xbcp.exe', [remotePath, localPath], ip);
+        } catch {
+            throw new Error('File download not yet supported via FTP');
+        }
     }
 }

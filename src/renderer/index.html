@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' 'unsafe-eval' file: data:; script-src 'self' 'unsafe-inline' 'unsafe-eval' file:; style-src 'self' 'unsafe-inline' file:; font-src 'self' file: data:; img-src 'self' file: data:; connect-src 'self' https: http:;">
     <title>Nexia IDE</title>
-    <link rel="stylesheet" href="styles/main.css">
+    <link rel="stylesheet" href="main.css">
 </head>
 <body>
     <!-- Custom Title Bar -->
@@ -16,9 +16,10 @@
             <span id="titlebar-project"></span>
         </div>
         <div id="titlebar-buttons">
-            <button id="btn-minimize" class="titlebar-btn">─</button>
-            <button id="btn-maximize" class="titlebar-btn">□</button>
-            <button id="btn-close" class="titlebar-btn btn-close">✕</button>
+            <div id="titlebar-user" title="Account & Settings"></div>
+            <button id="btn-minimize" class="titlebar-btn"><svg width="10" height="1" viewBox="0 0 10 1"><line x1="0" y1="0.5" x2="10" y2="0.5" stroke="currentColor" stroke-width="1"/></svg></button>
+            <button id="btn-maximize" class="titlebar-btn"><svg width="10" height="10" viewBox="0 0 10 10"><rect x="0.5" y="0.5" width="9" height="9" stroke="currentColor" stroke-width="1" fill="none"/></svg></button>
+            <button id="btn-close" class="titlebar-btn btn-close"><svg width="10" height="10" viewBox="0 0 10 10"><line x1="1" y1="1" x2="9" y2="9" stroke="currentColor" stroke-width="1.2"/><line x1="9" y1="1" x2="1" y2="9" stroke="currentColor" stroke-width="1.2"/></svg></button>
         </div>
     </div>
 
@@ -66,11 +67,22 @@
         <div class="menu-item" id="menu-build-menu">
             <span class="menu-label">Build</span>
             <div class="menu-dropdown" id="dropdown-build">
+                <div class="menu-config-row">
+                    <span class="menu-config-label">Configuration:</span>
+                    <select id="config-select" class="menu-config-select">
+                        <option value="Debug">Debug</option>
+                        <option value="Release">Release</option>
+                        <option value="Profile">Profile</option>
+                    </select>
+                </div>
+                <div class="menu-divider"></div>
                 <button class="menu-option" id="menu-build"><span>Build</span><span class="menu-shortcut">F7 / Ctrl+B</span></button>
                 <button class="menu-option" id="menu-rebuild"><span>Rebuild</span><span class="menu-shortcut">Ctrl+Shift+B</span></button>
                 <button class="menu-option" id="menu-clean"><span>Clean</span></button>
                 <div class="menu-divider"></div>
                 <button class="menu-option" id="menu-deploy"><span>Deploy to Devkit</span></button>
+                <div class="menu-divider"></div>
+                <button class="menu-option" id="menu-project-props"><span>Project Properties...</span></button>
             </div>
         </div>
         <div class="menu-item" id="menu-view">
@@ -79,38 +91,25 @@
                 <button class="menu-option" id="menu-toggle-sidebar"><span>Toggle Sidebar</span><span class="menu-shortcut">Ctrl+\</span></button>
                 <button class="menu-option" id="menu-toggle-output"><span>Toggle Output Panel</span><span class="menu-shortcut">Ctrl+`</span></button>
                 <div class="menu-divider"></div>
-                <button class="menu-option" id="menu-extensions"><span>Extensions</span></button>
                 <button class="menu-option" id="menu-sdk-tools"><span>SDK Tools</span></button>
                 <button class="menu-option" id="menu-xex-inspector"><span>Inspect XEX...</span></button>
-                <button class="menu-option" id="menu-settings"><span>Settings</span></button>
             </div>
         </div>
     </div>
 
     <!-- Toolbar -->
-    <div id="toolbar">
-        <div id="toolbar-left">
-            <select id="config-select" title="Build Configuration">
-                <option value="Debug">Debug</option>
-                <option value="Release">Release</option>
-                <option value="Profile">Profile</option>
-            </select>
-        </div>
-        <div id="toolbar-right">
-            <button class="toolbar-btn" id="btn-deploy" title="Deploy to Devkit">📡 Deploy</button>
-            <button class="toolbar-btn" id="btn-extensions" title="Extensions">🧩 Extensions</button>
-            <button class="toolbar-btn" id="btn-settings" title="Settings">⚙ Settings</button>
-        </div>
-    </div>
+
+    <!-- Toolbar removed — config in Build menu, settings/deploy/ext under username panel -->
 
     <!-- Main Layout -->
-    <div id="main">
+    <div id="main" class="bottom-hidden">
         <div id="sidebar">
             <div id="sidebar-tabs">
                 <button class="sidebar-tab active" data-panel="explorer" title="Explorer">📁</button>
                 <button class="sidebar-tab" data-panel="search" title="Find in Files (Ctrl+Shift+F)">🔍</button>
                 <button class="sidebar-tab" data-panel="ai" title="Nexia AI (Ctrl+Shift+A)">🤖</button>
-                <button class="sidebar-tab" data-panel="extensions" title="Extensions">🧩</button>
+                <button class="sidebar-tab" data-panel="extensions" title="Marketplace"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/><line x1="3" y1="9" x2="12" y2="2"/><line x1="12" y1="2" x2="21" y2="9"/><rect x="6" y="14" width="4" height="4" rx="0.5" fill="currentColor" opacity="0.3"/><rect x="14" y="14" width="4" height="4" rx="0.5" fill="currentColor" opacity="0.3"/></svg></button>
+                <button class="sidebar-tab" data-panel="git" title="Source Control">🔀</button>
                 <button class="sidebar-tab" data-panel="devkit" title="Devkit">📡</button>
                 <button class="sidebar-tab" data-panel="emulator" title="Emulator">🎮</button>
                 <button class="sidebar-tab" data-panel="learn" title="Learn">🎓</button>
@@ -126,6 +125,7 @@
                             <button class="panel-action-btn" id="explorer-new-folder" title="New Folder">▢+</button>
                             <button class="panel-action-btn" id="explorer-refresh" title="Refresh">↻</button>
                             <button class="panel-action-btn" id="explorer-collapse" title="Collapse All">⊟</button>
+                            <button class="panel-action-btn" id="explorer-close-project" title="Close Project"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 3h10M3 8h7M3 13h10"/><line x1="13" y1="6" x2="13" y2="10" stroke-width="1.8"/><line x1="11" y1="8" x2="15" y2="8" stroke-width="1.8" transform="rotate(45 13 8)"/><line x1="11" y1="8" x2="15" y2="8" stroke-width="1.8" transform="rotate(-45 13 8)"/></svg></button>
                         </div>
                     </div>
                     <div id="file-tree" class="panel-body"></div>
@@ -160,7 +160,7 @@
                     </div>
                 </div>
                 <div id="panel-extensions" class="sidebar-panel">
-                    <div class="panel-header">EXTENSIONS</div>
+                    <div class="panel-header">MARKETPLACE</div>
                     <div id="extensions-panel" class="panel-body"></div>
                 </div>
 
@@ -265,6 +265,15 @@
                         </div>
                     </div>
                 </div>
+                <div id="panel-git" class="sidebar-panel">
+                    <div class="panel-header">
+                        SOURCE CONTROL
+                        <div class="panel-actions">
+                            <button class="panel-action-btn" id="git-refresh-btn" title="Refresh">↻</button>
+                        </div>
+                    </div>
+                    <div id="git-panel" class="panel-body"></div>
+                </div>
                 <div id="panel-devkit" class="sidebar-panel">
                     <div class="panel-header">DEVKIT</div>
                     <div id="devkit-panel" class="panel-body"></div>
@@ -312,12 +321,13 @@
     </div>
 
     <!-- Bottom Panel -->
-    <div id="bottom-resize" class=""></div>
-    <div id="bottom-panel" class="">
+    <div id="bottom-resize" class="hidden"></div>
+    <div id="bottom-panel" class="hidden">
         <div id="bottom-tabs">
             <button class="bottom-tab active" data-panel="output">OUTPUT</button>
             <button class="bottom-tab" data-panel="problems">PROBLEMS</button>
             <button class="bottom-tab" data-panel="tips">TIPS</button>
+            <button class="bottom-tab" data-panel="visualizer">VISUALIZER</button>
             <div id="bottom-tabs-right">
                 <button id="btn-clear-output" class="bottom-action" title="Clear Output">🗑</button>
                 <button id="btn-close-bottom" class="bottom-action" title="Close Panel (Ctrl+`)">✕</button>
@@ -332,6 +342,23 @@
             </div>
             <div id="tips-panel" class="bottom-pane">
                 <div id="tips-list"></div>
+            </div>
+            <div id="visualizer-panel" class="bottom-pane">
+                <div id="visualizer-toolbar">
+                    <select id="viz-type" class="viz-select">
+                        <option value="variables">Variables</option>
+                        <option value="pointer">Pointer</option>
+                        <option value="array">Array</option>
+                        <option value="memory">Memory</option>
+                        <option value="stack">Stack</option>
+                        <option value="flowChart">Flow Chart</option>
+                        <option value="classDiagram">Class Diagram</option>
+                    </select>
+                    <input type="text" id="viz-command" class="viz-input" placeholder="e.g. int score = 42; float speed = 3.5f;">
+                    <button id="viz-run" class="viz-btn" title="Visualize">▶ Visualize</button>
+                    <button id="viz-clear" class="viz-btn" title="Clear">🗑 Clear</button>
+                </div>
+                <canvas id="visualizer-canvas"></canvas>
             </div>
         </div>
     </div>
@@ -377,6 +404,19 @@
                     <button id="setup-download-btn" class="setup-btn-download">Download Xbox 360 SDK</button>
                     <p class="setup-download-note">Opens in your browser. After installing, click Auto-Detect above.</p>
                 </div>
+                <div id="setup-sdk-partial" class="setup-download hidden">
+                    <div class="setup-download-icon">⚠️</div>
+                    <div class="setup-download-text">
+                        <strong>Partial SDK Installation Detected</strong>
+                        <p>Your SDK is missing <code>include/</code> and <code>lib/</code> directories needed for compilation. This happens when the SDK was installed without Visual Studio 2010.</p>
+                        <p>Nexia can fix this by temporarily adding registry keys so the SDK installer allows a Full Installation. <strong>This only touches Visual Studio 2010 application keys — it cannot affect Windows stability or boot.</strong></p>
+                    </div>
+                    <div id="setup-sdk-partial-path" style="font-size:11px;color:var(--text-dim);margin-bottom:8px;"></div>
+                    <button id="setup-prep-btn" class="setup-btn-download">Prepare for Full SDK Install</button>
+                    <button id="setup-cleanup-btn" class="setup-btn-secondary hidden" style="margin-top:6px;">Clean Up Registry Keys</button>
+                    <div id="setup-prep-status" style="margin-top:8px;font-size:12px;"></div>
+                    <p class="setup-download-note">After preparing, uninstall then reinstall the Xbox 360 SDK and select "Full Installation".</p>
+                </div>
                 <div id="setup-info">
                     <h3>What you need:</h3>
                     <ul>
@@ -388,6 +428,457 @@
             <div id="setup-footer">
                 <button id="setup-skip" class="setup-btn-secondary">Skip for Now</button>
                 <button id="setup-done" class="setup-btn-primary">Get Started →</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ═══ Project Properties Dialog ═══ -->
+    <div id="project-props-overlay" class="overlay hidden">
+        <div id="project-props-dialog">
+            <div class="pp-header">
+                <h2 id="pp-title">Project Properties</h2>
+                <div class="pp-config-bar">
+                    <label>Configuration:</label>
+                    <select id="pp-config-select">
+                        <option value="Debug">Debug</option>
+                        <option value="Release">Release</option>
+                        <option value="Profile">Profile</option>
+                    </select>
+                    <label>Platform:</label>
+                    <span class="pp-platform">Xbox 360</span>
+                </div>
+            </div>
+            <div class="pp-body">
+                <!-- Left: Tree Navigation -->
+                <div class="pp-tree">
+                    <div class="pp-tree-section">
+                        <div class="pp-tree-header" data-section="general">Configuration Properties</div>
+                        <div class="pp-tree-item active" data-page="general">General</div>
+                        <div class="pp-tree-item" data-page="debugging">Debugging</div>
+                        <div class="pp-tree-item" data-page="vc-directories">VC++ Directories</div>
+                    </div>
+                    <div class="pp-tree-section">
+                        <div class="pp-tree-header pp-tree-collapsible" data-toggle="cpp">C/C++</div>
+                        <div class="pp-tree-group" id="pp-tree-cpp">
+                            <div class="pp-tree-item" data-page="cpp-general">General</div>
+                            <div class="pp-tree-item" data-page="cpp-optimization">Optimization</div>
+                            <div class="pp-tree-item" data-page="cpp-preprocessor">Preprocessor</div>
+                            <div class="pp-tree-item" data-page="cpp-codegen">Code Generation</div>
+                            <div class="pp-tree-item" data-page="cpp-language">Language</div>
+                            <div class="pp-tree-item" data-page="cpp-pch">Precompiled Headers</div>
+                            <div class="pp-tree-item" data-page="cpp-output">Output Files</div>
+                            <div class="pp-tree-item" data-page="cpp-advanced">Advanced</div>
+                            <div class="pp-tree-item" data-page="cpp-xbox360">Xbox 360</div>
+                            <div class="pp-tree-item" data-page="cpp-cmdline">Command Line</div>
+                        </div>
+                    </div>
+                    <div class="pp-tree-section">
+                        <div class="pp-tree-header pp-tree-collapsible" data-toggle="linker">Linker</div>
+                        <div class="pp-tree-group" id="pp-tree-linker">
+                            <div class="pp-tree-item" data-page="link-general">General</div>
+                            <div class="pp-tree-item" data-page="link-input">Input</div>
+                            <div class="pp-tree-item" data-page="link-debugging">Debugging</div>
+                            <div class="pp-tree-item" data-page="link-system">System</div>
+                            <div class="pp-tree-item" data-page="link-optimization">Optimization</div>
+                            <div class="pp-tree-item" data-page="link-advanced">Advanced</div>
+                            <div class="pp-tree-item" data-page="link-cmdline">Command Line</div>
+                        </div>
+                    </div>
+                    <div class="pp-tree-section">
+                        <div class="pp-tree-header pp-tree-collapsible" data-toggle="xex">Xbox 360 Image Conversion</div>
+                        <div class="pp-tree-group" id="pp-tree-xex">
+                            <div class="pp-tree-item" data-page="xex-general">General</div>
+                            <div class="pp-tree-item" data-page="xex-privileges">Privileges</div>
+                            <div class="pp-tree-item" data-page="xex-cmdline">Command Line</div>
+                        </div>
+                    </div>
+                    <div class="pp-tree-section">
+                        <div class="pp-tree-header pp-tree-collapsible" data-toggle="browse">Browse Information</div>
+                        <div class="pp-tree-group" id="pp-tree-browse">
+                            <div class="pp-tree-item" data-page="browse-general">General</div>
+                            <div class="pp-tree-item" data-page="browse-cmdline">Command Line</div>
+                        </div>
+                    </div>
+                    <div class="pp-tree-section">
+                        <div class="pp-tree-header pp-tree-collapsible" data-toggle="buildevents">Build Events</div>
+                        <div class="pp-tree-group" id="pp-tree-buildevents">
+                            <div class="pp-tree-item" data-page="evt-prebuild">Pre-Build Event</div>
+                            <div class="pp-tree-item" data-page="evt-prelink">Pre-Link Event</div>
+                            <div class="pp-tree-item" data-page="evt-postbuild">Post-Build Event</div>
+                        </div>
+                    </div>
+                    <div class="pp-tree-section">
+                        <div class="pp-tree-header pp-tree-collapsible" data-toggle="deploy">Console Deployment</div>
+                        <div class="pp-tree-group" id="pp-tree-deploy">
+                            <div class="pp-tree-item" data-page="deploy-general">General</div>
+                            <div class="pp-tree-item" data-page="deploy-copy">Copy To Hard Drive</div>
+                            <div class="pp-tree-item" data-page="deploy-dvd">Emulate DVD Drive</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Right: Property Grid -->
+                <div class="pp-content">
+                    <!-- ═══ General ═══ -->
+                    <div class="pp-page active" id="pp-page-general">
+                        <div class="pp-grid-section">General</div>
+                        <div class="pp-grid-row"><span>Output Directory</span><input type="text" id="pp-out-dir" value="$(ProjectDir)out\$(Configuration)\"></div>
+                        <div class="pp-grid-row"><span>Intermediate Directory</span><input type="text" id="pp-int-dir" value="$(Configuration)\"></div>
+                        <div class="pp-grid-row"><span>Extensions to Delete on Clean</span><input type="text" id="pp-clean-ext" value="*.obj;*.pch;*.pdb;*.ilk;*.exp;*.xex;*.exe;*.rsp"></div>
+                        <div class="pp-grid-row"><span>Platform Toolset</span><span class="pp-static">Xbox 360 SDK (2010-01)</span></div>
+                        <div class="pp-grid-section">Project Defaults</div>
+                        <div class="pp-grid-row"><span>Configuration Type</span>
+                            <select id="pp-config-type"><option value="executable">Title (.xex)</option><option value="library">Static Library (.lib)</option><option value="dll">Dynamic Library (.xex)</option></select></div>
+                        <div class="pp-grid-row"><span>Character Set</span>
+                            <select id="pp-charset"><option value="mbcs">Use Multi-Byte Character Set</option><option value="unicode">Use Unicode Character Set</option><option value="none">Not Set</option></select></div>
+                        <div class="pp-grid-row"><span>Whole Program Optimization</span>
+                            <select id="pp-wpo"><option value="false">No Whole Program Optimization</option><option value="true">Use Link Time Code Generation</option></select></div>
+                    </div>
+
+                    <!-- ═══ Debugging ═══ -->
+                    <div class="pp-page" id="pp-page-debugging">
+                        <div class="pp-grid-section">Debugger</div>
+                        <div class="pp-grid-row"><span>Debugger to launch</span><span class="pp-static">Xbox 360 Debugger</span></div>
+                        <div class="pp-grid-row"><span>Command</span><input type="text" id="pp-dbg-command" value="$(RemotePath)"></div>
+                        <div class="pp-grid-row"><span>Command Arguments</span><input type="text" id="pp-dbg-args"></div>
+                        <div class="pp-grid-row"><span>Map DVD Drive</span>
+                            <select id="pp-dbg-dvd"><option value="false">No</option><option value="true">Yes</option></select></div>
+                        <div class="pp-grid-row"><span>Remote Machine</span><input type="text" id="pp-dbg-remote" value="$(DefaultConsole)"></div>
+                        <div class="pp-grid-row"><span>Check up-to-date</span>
+                            <select id="pp-dbg-uptodate"><option value="true">Yes</option><option value="false">No</option></select></div>
+                    </div>
+
+                    <!-- ═══ VC++ Directories ═══ -->
+                    <div class="pp-page" id="pp-page-vc-directories">
+                        <div class="pp-grid-section">General</div>
+                        <div class="pp-grid-row"><span>Executable Directories</span><input type="text" id="pp-vc-exec-dirs"></div>
+                        <div class="pp-grid-row"><span>Include Directories</span><input type="text" id="pp-vc-include-dirs"></div>
+                        <div class="pp-grid-row"><span>Library Directories</span><input type="text" id="pp-vc-lib-dirs"></div>
+                        <div class="pp-grid-row"><span>Source Directories</span><input type="text" id="pp-vc-src-dirs"></div>
+                        <div class="pp-grid-row"><span>Exclude Directories</span><input type="text" id="pp-vc-exclude-dirs"></div>
+                    </div>
+
+                    <!-- ═══ C/C++ General ═══ -->
+                    <div class="pp-page" id="pp-page-cpp-general">
+                        <div class="pp-grid-section">General</div>
+                        <div class="pp-grid-row"><span>Additional Include Directories</span><input type="text" id="pp-cpp-inc-dirs"></div>
+                        <div class="pp-grid-row"><span>Debug Information Format</span>
+                            <select id="pp-cpp-debug-info"><option value="Zi">Program Database (/Zi)</option><option value="ZI">Edit and Continue (/ZI)</option><option value="Z7">C7 Compatible (/Z7)</option><option value="none">Disabled</option></select></div>
+                        <div class="pp-grid-row"><span>Suppress Startup Banner</span>
+                            <select id="pp-cpp-nologo"><option value="true">Yes (/nologo)</option><option value="false">No</option></select></div>
+                        <div class="pp-grid-row"><span>Warning Level</span>
+                            <select id="pp-cpp-warn"><option value="0">Turn Off All Warnings (/W0)</option><option value="1">Level1 (/W1)</option><option value="2">Level2 (/W2)</option><option value="3" selected>Level3 (/W3)</option><option value="4">Level4 (/W4)</option><option value="all">EnableAllWarnings (/Wall)</option></select></div>
+                        <div class="pp-grid-row"><span>Treat Warnings As Errors</span>
+                            <select id="pp-cpp-wx"><option value="false">No (/WX-)</option><option value="true">Yes (/WX)</option></select></div>
+                        <div class="pp-grid-row"><span>Multi-processor Compilation</span>
+                            <select id="pp-cpp-mp"><option value="false">No</option><option value="true">Yes (/MP)</option></select></div>
+                    </div>
+
+                    <!-- ═══ C/C++ Optimization ═══ -->
+                    <div class="pp-page" id="pp-page-cpp-optimization">
+                        <div class="pp-grid-section">Optimization</div>
+                        <div class="pp-grid-row"><span>Optimization</span>
+                            <select id="pp-cpp-opt"><option value="default">Use Configuration Default</option><option value="Od">Disabled (/Od)</option><option value="O1">Minimize Size (/O1)</option><option value="O2">Maximize Speed (/O2)</option><option value="Ox">Full Optimization (/Ox)</option></select></div>
+                        <div class="pp-grid-row"><span>Inline Function Expansion</span>
+                            <select id="pp-cpp-inline"><option value="default">Default</option><option value="Ob0">Disabled (/Ob0)</option><option value="Ob1">Only __inline (/Ob1)</option><option value="Ob2">Any Suitable (/Ob2)</option></select></div>
+                        <div class="pp-grid-row"><span>Enable Intrinsic Functions</span>
+                            <select id="pp-cpp-intrinsic"><option value="false">No</option><option value="true">Yes (/Oi)</option></select></div>
+                        <div class="pp-grid-row"><span>Favor Size Or Speed</span>
+                            <select id="pp-cpp-favor"><option value="neither">Neither</option><option value="speed">Favor Fast Code (/Ot)</option><option value="size">Favor Small Code (/Os)</option></select></div>
+                        <div class="pp-grid-row"><span>Whole Program Optimization</span>
+                            <select id="pp-cpp-wpo"><option value="false">No</option><option value="true">Yes (/GL)</option></select></div>
+                    </div>
+
+                    <!-- ═══ C/C++ Preprocessor ═══ -->
+                    <div class="pp-page" id="pp-page-cpp-preprocessor">
+                        <div class="pp-grid-section">Preprocessor</div>
+                        <div class="pp-grid-row"><span>Preprocessor Definitions</span><input type="text" id="pp-cpp-defines" placeholder="_XBOX;XBOX;_XBOX_VER=200"></div>
+                        <div class="pp-grid-row"><span>Undefine Preprocessor Definitions</span><input type="text" id="pp-cpp-undefs"></div>
+                    </div>
+
+                    <!-- ═══ C/C++ Code Generation ═══ -->
+                    <div class="pp-page" id="pp-page-cpp-codegen">
+                        <div class="pp-grid-section">Code Generation</div>
+                        <div class="pp-grid-row"><span>Enable String Pooling</span>
+                            <select id="pp-cpp-stringpool"><option value="false">No (/GF-)</option><option value="true">Yes (/GF)</option></select></div>
+                        <div class="pp-grid-row"><span>Enable Minimal Rebuild</span>
+                            <select id="pp-cpp-minrebuild"><option value="false">No</option><option value="true">Yes (/Gm)</option></select></div>
+                        <div class="pp-grid-row"><span>Enable C++ Exceptions</span>
+                            <select id="pp-cpp-exceptions"><option value="sync">Yes (/EHsc)</option><option value="async">Yes with SEH (/EHa)</option><option value="none">No</option></select></div>
+                        <div class="pp-grid-row"><span>Smaller Type Check</span>
+                            <select id="pp-cpp-smalltype"><option value="false">No</option><option value="true">Yes (/RTCc)</option></select></div>
+                        <div class="pp-grid-row"><span>Basic Runtime Checks</span>
+                            <select id="pp-cpp-rtc"><option value="default">Default</option><option value="su">Stack Frames (/RTCs)</option><option value="u">Uninitialized Variables (/RTCu)</option><option value="1">Both (/RTC1)</option></select></div>
+                        <div class="pp-grid-row"><span>Runtime Library</span>
+                            <select id="pp-cpp-runtime"><option value="MTd">Multi-threaded Debug (/MTd)</option><option value="MT">Multi-threaded (/MT)</option></select></div>
+                        <div class="pp-grid-row"><span>Struct Member Alignment</span>
+                            <select id="pp-cpp-align"><option value="default">Default</option><option value="1">1 Byte (/Zp1)</option><option value="2">2 Bytes (/Zp2)</option><option value="4">4 Bytes (/Zp4)</option><option value="8">8 Bytes (/Zp8)</option><option value="16">16 Bytes (/Zp16)</option></select></div>
+                        <div class="pp-grid-row"><span>Buffer Security Check</span>
+                            <select id="pp-cpp-gs"><option value="false">No (/GS-)</option><option value="true">Yes (/GS)</option></select></div>
+                        <div class="pp-grid-row"><span>Enable RTTI</span>
+                            <select id="pp-cpp-rtti"><option value="false">No (/GR-)</option><option value="true">Yes (/GR)</option></select></div>
+                        <div class="pp-grid-row"><span>Enable Function-Level Linking</span>
+                            <select id="pp-cpp-funclink"><option value="false">No (/Gy-)</option><option value="true">Yes (/Gy)</option></select></div>
+                        <div class="pp-grid-row"><span>Floating Point Model</span>
+                            <select id="pp-cpp-fp"><option value="fast">Fast (/fp:fast)</option><option value="precise">Precise (/fp:precise)</option><option value="strict">Strict (/fp:strict)</option></select></div>
+                        <div class="pp-grid-row"><span>Enable Floating Point Exceptions</span>
+                            <select id="pp-cpp-fpexcept"><option value="false">No (/fp:except-)</option><option value="true">Yes (/fp:except)</option></select></div>
+                    </div>
+
+                    <!-- ═══ C/C++ Language ═══ -->
+                    <div class="pp-page" id="pp-page-cpp-language">
+                        <div class="pp-grid-section">Language</div>
+                        <div class="pp-grid-row"><span>Treat wchar_t As Built-in Type</span>
+                            <select id="pp-cpp-wchar"><option value="true">Yes (/Zc:wchar_t)</option><option value="false">No (/Zc:wchar_t-)</option></select></div>
+                        <div class="pp-grid-row"><span>Force Conformance in For Loop Scope</span>
+                            <select id="pp-cpp-forscope"><option value="true">Yes (/Zc:forScope)</option><option value="false">No (/Zc:forScope-)</option></select></div>
+                        <div class="pp-grid-row"><span>Enable Run-Time Type Info</span>
+                            <select id="pp-cpp-rtti2"><option value="false">No (/GR-)</option><option value="true">Yes (/GR)</option></select></div>
+                    </div>
+
+                    <!-- ═══ C/C++ Precompiled Headers ═══ -->
+                    <div class="pp-page" id="pp-page-cpp-pch">
+                        <div class="pp-grid-section">Precompiled Headers</div>
+                        <div class="pp-grid-row"><span>Precompiled Header</span>
+                            <select id="pp-cpp-pch-mode"><option value="use">Use (/Yu)</option><option value="create">Create (/Yc)</option><option value="none">Not Using</option></select></div>
+                        <div class="pp-grid-row"><span>Precompiled Header File</span><input type="text" id="pp-cpp-pch-header" value="stdafx.h"></div>
+                        <div class="pp-grid-row"><span>Precompiled Header Output File</span><input type="text" id="pp-cpp-pch-output" value="$(IntDir)$(TargetName).pch"></div>
+                    </div>
+
+                    <!-- ═══ C/C++ Output Files ═══ -->
+                    <div class="pp-page" id="pp-page-cpp-output">
+                        <div class="pp-grid-section">Output Files</div>
+                        <div class="pp-grid-row"><span>Object File Name</span><input type="text" id="pp-cpp-obj-name" value="$(IntDir)"></div>
+                        <div class="pp-grid-row"><span>Program Database File Name</span><input type="text" id="pp-cpp-pdb-name" value="$(IntDir)vc100.pdb"></div>
+                    </div>
+
+                    <!-- ═══ C/C++ Advanced ═══ -->
+                    <div class="pp-page" id="pp-page-cpp-advanced">
+                        <div class="pp-grid-section">Advanced</div>
+                        <div class="pp-grid-row"><span>Calling Convention</span>
+                            <select id="pp-cpp-callconv"><option value="Gd">__cdecl (/Gd)</option><option value="Gr">__fastcall (/Gr)</option><option value="Gz">__stdcall (/Gz)</option></select></div>
+                        <div class="pp-grid-row"><span>Disable Specific Warnings</span><input type="text" id="pp-cpp-disable-warns" placeholder="4996;4267"></div>
+                    </div>
+
+                    <!-- ═══ C/C++ Xbox 360 ═══ -->
+                    <div class="pp-page" id="pp-page-cpp-xbox360">
+                        <div class="pp-grid-section">Xbox 360</div>
+                        <div class="pp-grid-row"><span>Generate PPC Intrinsics</span>
+                            <select id="pp-cpp-ppc"><option value="false">No</option><option value="true">Yes</option></select></div>
+                    </div>
+
+                    <!-- ═══ C/C++ Command Line ═══ -->
+                    <div class="pp-page" id="pp-page-cpp-cmdline">
+                        <div class="pp-grid-section">Command Line</div>
+                        <div class="pp-grid-row pp-row-wide"><span>Additional Options</span>
+                            <textarea id="pp-cpp-extra" rows="4" placeholder="Additional compiler flags..."></textarea></div>
+                        <div class="pp-grid-section">Computed Command Line</div>
+                        <pre id="pp-cpp-computed" class="pp-computed"></pre>
+                    </div>
+
+                    <!-- ═══ Linker General ═══ -->
+                    <div class="pp-page" id="pp-page-link-general">
+                        <div class="pp-grid-section">General</div>
+                        <div class="pp-grid-row"><span>Output File</span><input type="text" id="pp-link-output" value="$(OutDir)$(TargetName).exe"></div>
+                        <div class="pp-grid-row"><span>Show Progress</span>
+                            <select id="pp-link-verbose"><option value="false">Not Set</option><option value="true">Display All Progress Messages (/VERBOSE)</option></select></div>
+                        <div class="pp-grid-row"><span>Additional Library Directories</span><input type="text" id="pp-link-libdirs"></div>
+                        <div class="pp-grid-row"><span>Enable Incremental Linking</span>
+                            <select id="pp-link-incremental"><option value="default">Default</option><option value="true">Yes (/INCREMENTAL)</option><option value="false">No (/INCREMENTAL:NO)</option></select></div>
+                    </div>
+
+                    <!-- ═══ Linker Input ═══ -->
+                    <div class="pp-page" id="pp-page-link-input">
+                        <div class="pp-grid-section">Input</div>
+                        <div class="pp-grid-row"><span>Additional Dependencies</span><input type="text" id="pp-link-deps" placeholder="xapilib.lib;d3d9.lib;..."></div>
+                        <div class="pp-grid-row"><span>Ignore Specific Default Libraries</span><input type="text" id="pp-link-nodefault" placeholder="xapilib.lib"></div>
+                    </div>
+
+                    <!-- ═══ Linker Debugging ═══ -->
+                    <div class="pp-page" id="pp-page-link-debugging">
+                        <div class="pp-grid-section">Debugging</div>
+                        <div class="pp-grid-row"><span>Generate Debug Info</span>
+                            <select id="pp-link-debug"><option value="true">Yes (/DEBUG)</option><option value="false">No</option></select></div>
+                        <div class="pp-grid-row"><span>Generate Program Database File</span><input type="text" id="pp-link-pdb" value="$(OutDir)$(TargetName).pdb"></div>
+                        <div class="pp-grid-row"><span>Strip Private Symbols</span><input type="text" id="pp-link-strip-private"></div>
+                        <div class="pp-grid-row"><span>Generate Map File</span>
+                            <select id="pp-link-mapfile"><option value="false">No</option><option value="true">Yes (/MAP)</option></select></div>
+                        <div class="pp-grid-row"><span>Map File Name</span><input type="text" id="pp-link-mapname"></div>
+                        <div class="pp-grid-row"><span>Map Exports</span>
+                            <select id="pp-link-mapexports"><option value="false">No</option><option value="true">Yes (/MAPINFO:EXPORTS)</option></select></div>
+                    </div>
+
+                    <!-- ═══ Linker System ═══ -->
+                    <div class="pp-page" id="pp-page-link-system">
+                        <div class="pp-grid-section">System</div>
+                        <div class="pp-grid-row"><span>Stack Reserve Size</span><input type="text" id="pp-link-stack" placeholder="65536"></div>
+                        <div class="pp-grid-row"><span>Stack Commit Size</span><input type="text" id="pp-link-stack-commit"></div>
+                    </div>
+
+                    <!-- ═══ Linker Optimization ═══ -->
+                    <div class="pp-page" id="pp-page-link-optimization">
+                        <div class="pp-grid-section">Optimization</div>
+                        <div class="pp-grid-row"><span>References</span>
+                            <select id="pp-link-opt-ref"><option value="default">Default</option><option value="true">Eliminate Unreferenced Data (/OPT:REF)</option><option value="false">Keep Unreferenced Data (/OPT:NOREF)</option></select></div>
+                        <div class="pp-grid-row"><span>Enable COMDAT Folding</span>
+                            <select id="pp-link-opt-icf"><option value="default">Default</option><option value="true">Remove Redundant COMDATs (/OPT:ICF)</option><option value="false">Do Not Remove (/OPT:NOICF)</option></select></div>
+                        <div class="pp-grid-row"><span>Function Order</span><input type="text" id="pp-link-funcorder"></div>
+                        <div class="pp-grid-row"><span>Profile Guided Database</span><input type="text" id="pp-link-pgd" value="$(TargetDir)$(TargetName).pgd"></div>
+                        <div class="pp-grid-row"><span>Link Time Code Generation</span>
+                            <select id="pp-link-ltcg"><option value="default">Default</option><option value="ltcg">Use Link Time Code Generation (/LTCG)</option><option value="pginstrument">Profile Guided - Instrument (/LTCG:PGInstrument)</option><option value="pgoptimize">Profile Guided - Optimize (/LTCG:PGOptimize)</option><option value="pgupdate">Profile Guided - Update (/LTCG:PGUpdate)</option></select></div>
+                    </div>
+
+                    <!-- ═══ Linker Advanced ═══ -->
+                    <div class="pp-page" id="pp-page-link-advanced">
+                        <div class="pp-grid-section">Advanced</div>
+                        <div class="pp-grid-row"><span>Entry Point</span><input type="text" id="pp-link-entry"></div>
+                        <div class="pp-grid-row"><span>No Entry Point</span>
+                            <select id="pp-link-noentry"><option value="false">No</option><option value="true">Yes (/NOENTRY)</option></select></div>
+                        <div class="pp-grid-row"><span>Set Checksum</span>
+                            <select id="pp-link-checksum"><option value="false">No</option><option value="true">Yes (/RELEASE)</option></select></div>
+                        <div class="pp-grid-row"><span>Base Address</span><input type="text" id="pp-link-baseaddr"></div>
+                        <div class="pp-grid-row"><span>Fixed Base Address</span>
+                            <select id="pp-link-fixedbase"><option value="default">Default</option><option value="true">Yes (/FIXED)</option><option value="false">No (/FIXED:NO)</option></select></div>
+                        <div class="pp-grid-row"><span>Import Library</span><input type="text" id="pp-link-implib"></div>
+                        <div class="pp-grid-row"><span>Merge Sections</span><input type="text" id="pp-link-mergesections"></div>
+                        <div class="pp-grid-row"><span>Image Has Safe Exception Handlers</span>
+                            <select id="pp-link-safeseh"><option value="default">Default</option><option value="true">Yes (/SAFESEH)</option><option value="false">No (/SAFESEH:NO)</option></select></div>
+                        <div class="pp-grid-row"><span>Error Reporting</span>
+                            <select id="pp-link-errorreport"><option value="queue">Queue For Next Login (/ERRORREPORT:QUEUE)</option><option value="prompt">Prompt Immediately (/ERRORREPORT:PROMPT)</option><option value="none">No Error Report (/ERRORREPORT:NONE)</option></select></div>
+                    </div>
+
+                    <!-- ═══ Linker Command Line ═══ -->
+                    <div class="pp-page" id="pp-page-link-cmdline">
+                        <div class="pp-grid-section">Command Line</div>
+                        <div class="pp-grid-row pp-row-wide"><span>Additional Options</span>
+                            <textarea id="pp-link-extra" rows="4" placeholder="Additional linker flags..."></textarea></div>
+                    </div>
+
+                    <!-- ═══ Xbox 360 Image Conversion General ═══ -->
+                    <div class="pp-page" id="pp-page-xex-general">
+                        <div class="pp-grid-section">General</div>
+                        <div class="pp-grid-row"><span>Configuration File</span><input type="text" id="pp-xex-config" placeholder="xex.xml"></div>
+                        <div class="pp-grid-row"><span>Output File</span><input type="text" id="pp-xex-output" value="$(OutDir)$(ProjectName).xex"></div>
+                        <div class="pp-grid-row"><span>Title ID</span><input type="text" id="pp-xex-titleid" placeholder="0x00000000"></div>
+                        <div class="pp-grid-row"><span>LAN Key</span><input type="text" id="pp-xex-lankey"></div>
+                        <div class="pp-grid-row"><span>Suppress Startup Banner</span>
+                            <select id="pp-xex-nologo"><option value="true">Yes (/nologo)</option><option value="false">No</option></select></div>
+                        <div class="pp-grid-row"><span>Base Address</span><input type="text" id="pp-xex-baseaddr"></div>
+                        <div class="pp-grid-row"><span>Heap Size</span><input type="text" id="pp-xex-heapsize"></div>
+                        <div class="pp-grid-row"><span>Workspace Size</span><input type="text" id="pp-xex-workspace"></div>
+                        <div class="pp-grid-row"><span>Additional Sections</span><input type="text" id="pp-xex-sections"></div>
+                        <div class="pp-grid-row"><span>Export By Name</span>
+                            <select id="pp-xex-exportbyname"><option value="false">No</option><option value="true">Yes</option></select></div>
+                    </div>
+
+                    <!-- ═══ Xbox 360 Image Conversion Privileges ═══ -->
+                    <div class="pp-page" id="pp-page-xex-privileges">
+                        <div class="pp-grid-section">Privileges</div>
+                        <div class="pp-grid-row"><span>Optical Disc Drive Mapping</span>
+                            <select id="pp-xex-dvdmap"><option value="false">No</option><option value="true">Yes</option></select></div>
+                        <div class="pp-grid-row"><span>PAL50 Incompatible</span>
+                            <select id="pp-xex-pal50"><option value="false">No</option><option value="true">Yes</option></select></div>
+                        <div class="pp-grid-row"><span>Multi-disc Title</span>
+                            <select id="pp-xex-multidisc"><option value="false">No</option><option value="true">Yes</option></select></div>
+                        <div class="pp-grid-row"><span>Prefer Big Button Input</span>
+                            <select id="pp-xex-bigbutton"><option value="false">No</option><option value="true">Yes</option></select></div>
+                        <div class="pp-grid-row"><span>Cross Platform System Link</span>
+                            <select id="pp-xex-crossplatform"><option value="false">No</option><option value="true">Yes</option></select></div>
+                        <div class="pp-grid-row"><span>Allow Avatar Get Metadata By XUID</span>
+                            <select id="pp-xex-avatarxuid"><option value="false">No</option><option value="true">Yes</option></select></div>
+                        <div class="pp-grid-row"><span>Allow Controller Swapping</span>
+                            <select id="pp-xex-controllerswap"><option value="false">No</option><option value="true">Yes</option></select></div>
+                        <div class="pp-grid-row"><span>Require Full Experience</span>
+                            <select id="pp-xex-fullexp"><option value="false">No</option><option value="true">Yes</option></select></div>
+                        <div class="pp-grid-row"><span>Game Voice Required UI</span>
+                            <select id="pp-xex-gamevoice"><option value="false">No</option><option value="true">Yes</option></select></div>
+                        <div class="pp-grid-row"><span>Allow Network Access</span>
+                            <select id="pp-xex-network"><option value="false">No</option><option value="true">Yes</option></select></div>
+                        <div class="pp-grid-row"><span>Allow Xbox Live</span>
+                            <select id="pp-xex-live"><option value="false">No</option><option value="true">Yes</option></select></div>
+                        <div class="pp-grid-row"><span>Kinect Elevation Control</span>
+                            <select id="pp-xex-kinectelev"><option value="false">No</option><option value="true">Yes</option></select></div>
+                        <div class="pp-grid-row"><span>Skeletal Tracking Requirement</span>
+                            <select id="pp-xex-skeletal"><option value="none">None</option><option value="optional">Optional</option><option value="required">Required</option></select></div>
+                    </div>
+
+                    <!-- ═══ Xbox 360 Image Conversion Command Line ═══ -->
+                    <div class="pp-page" id="pp-page-xex-cmdline">
+                        <div class="pp-grid-section">All Options</div>
+                        <pre id="pp-xex-computed" class="pp-computed"></pre>
+                        <div class="pp-grid-section">Additional Options</div>
+                        <div class="pp-grid-row pp-row-wide"><span>Additional Options</span>
+                            <textarea id="pp-xex-extra" rows="3" placeholder="Additional imagexex flags..."></textarea></div>
+                    </div>
+
+                    <!-- ═══ Browse Information General ═══ -->
+                    <div class="pp-page" id="pp-page-browse-general">
+                        <div class="pp-grid-section">General</div>
+                        <div class="pp-grid-row"><span>Suppress Startup Banner</span>
+                            <select id="pp-browse-nologo"><option value="true">Yes (/nologo)</option><option value="false">No</option></select></div>
+                        <div class="pp-grid-row"><span>Output File</span><input type="text" id="pp-browse-output" value="$(OutDir)$(TargetName).bsc"></div>
+                        <div class="pp-grid-row"><span>Preserve SBR Files</span>
+                            <select id="pp-browse-preserve"><option value="false">No</option><option value="true">Yes</option></select></div>
+                    </div>
+
+                    <!-- ═══ Browse Information Command Line ═══ -->
+                    <div class="pp-page" id="pp-page-browse-cmdline">
+                        <div class="pp-grid-section">All Options</div>
+                        <pre id="pp-browse-computed" class="pp-computed"></pre>
+                        <div class="pp-grid-section">Additional Options</div>
+                        <div class="pp-grid-row pp-row-wide"><span>Additional Options</span>
+                            <textarea id="pp-browse-extra" rows="3" placeholder="Additional bscmake flags..."></textarea></div>
+                    </div>
+
+                    <!-- ═══ Build Events ═══ -->
+                    <div class="pp-page" id="pp-page-evt-prebuild">
+                        <div class="pp-grid-section">Pre-Build Event</div>
+                        <div class="pp-grid-row pp-row-wide"><span>Command Line</span>
+                            <textarea id="pp-evt-prebuild-cmd" rows="4" placeholder="Commands to run before build..."></textarea></div>
+                        <div class="pp-grid-row"><span>Description</span><input type="text" id="pp-evt-prebuild-desc"></div>
+                    </div>
+                    <div class="pp-page" id="pp-page-evt-prelink">
+                        <div class="pp-grid-section">Pre-Link Event</div>
+                        <div class="pp-grid-row pp-row-wide"><span>Command Line</span>
+                            <textarea id="pp-evt-prelink-cmd" rows="4" placeholder="Commands to run before link..."></textarea></div>
+                        <div class="pp-grid-row"><span>Description</span><input type="text" id="pp-evt-prelink-desc"></div>
+                    </div>
+                    <div class="pp-page" id="pp-page-evt-postbuild">
+                        <div class="pp-grid-section">Post-Build Event</div>
+                        <div class="pp-grid-row pp-row-wide"><span>Command Line</span>
+                            <textarea id="pp-evt-postbuild-cmd" rows="4" placeholder="Commands to run after build..."></textarea></div>
+                        <div class="pp-grid-row"><span>Description</span><input type="text" id="pp-evt-postbuild-desc"></div>
+                    </div>
+
+                    <!-- ═══ Console Deployment ═══ -->
+                    <div class="pp-page" id="pp-page-deploy-general">
+                        <div class="pp-grid-section">General</div>
+                        <div class="pp-grid-row"><span>Deployment Type</span>
+                            <select id="pp-deploy-type"><option value="copy">Copy to Hard Drive</option><option value="dvd">Emulate DVD Drive</option></select></div>
+                        <div class="pp-grid-row"><span>Deployment Directory</span><input type="text" id="pp-deploy-dir" placeholder="devkit:\$(TargetName)\"></div>
+                    </div>
+                    <div class="pp-page" id="pp-page-deploy-copy">
+                        <div class="pp-grid-section">Copy To Hard Drive</div>
+                        <div class="pp-grid-row"><span>Additional Files</span><input type="text" id="pp-deploy-files" placeholder="Content\*.*"></div>
+                        <div class="pp-grid-row"><span>Exclude Files</span><input type="text" id="pp-deploy-exclude"></div>
+                    </div>
+                    <div class="pp-page" id="pp-page-deploy-dvd">
+                        <div class="pp-grid-section">Emulate DVD Drive</div>
+                        <div class="pp-grid-row"><span>Layout File</span><input type="text" id="pp-deploy-layout"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Description bar -->
+            <div id="pp-desc-bar" class="pp-desc-bar">
+                <strong id="pp-desc-title"></strong>
+                <span id="pp-desc-text"></span>
+            </div>
+
+            <div class="pp-footer">
+                <button id="pp-ok" class="setup-btn-primary">OK</button>
+                <button id="pp-cancel" class="setup-btn-secondary">Cancel</button>
+                <button id="pp-apply" class="setup-btn-primary">Apply</button>
             </div>
         </div>
     </div>
@@ -481,92 +972,7 @@
     </div>
 
     <!-- Settings Panel -->
-    <div id="settings-overlay" class="overlay hidden">
-        <div id="settings-dialog">
-            <h2>⚙ Settings</h2>
-
-            <div class="settings-section">
-                <h3>Editor</h3>
-                <div class="settings-row">
-                    <label>Font Size</label>
-                    <input type="number" id="setting-font-size" data-setting="fontSize" min="8" max="40" value="14">
-                </div>
-            </div>
-
-            <div class="settings-section">
-                <h3>Visual Effects</h3>
-                <div class="settings-row">
-                    <label>Fancy Mode</label>
-                    <label class="toggle-switch">
-                        <input type="checkbox" id="setting-fancy-effects" checked>
-                        <span class="toggle-slider"></span>
-                    </label>
-                </div>
-                <p class="settings-desc">
-                    Glassmorphism, glow effects, animations, floating orbs, and decorative shadows. Turn off for a clean, flat look.
-                </p>
-            </div>
-
-            <div class="settings-section">
-                <h3>Theme Colors</h3>
-                <div class="settings-color-grid">
-                    <div class="settings-row">
-                        <label>Accent Color</label>
-                        <input type="color" data-setting="accentColor" value="#4ec9b0">
-                    </div>
-                    <div class="settings-row">
-                        <label>Background (Dark)</label>
-                        <input type="color" data-setting="bgDark" value="#181818">
-                    </div>
-                    <div class="settings-row">
-                        <label>Background (Main)</label>
-                        <input type="color" data-setting="bgMain" value="#1e1e1e">
-                    </div>
-                    <div class="settings-row">
-                        <label>Panel Background</label>
-                        <input type="color" data-setting="bgPanel" value="#1e1e1e">
-                    </div>
-                    <div class="settings-row">
-                        <label>Sidebar Background</label>
-                        <input type="color" data-setting="bgSidebar" value="#252526">
-                    </div>
-                    <div class="settings-row">
-                        <label>Editor Background</label>
-                        <input type="color" data-setting="editorBg" value="#1e1e1e">
-                    </div>
-                    <div class="settings-row">
-                        <label>Text Color</label>
-                        <input type="color" data-setting="textColor" value="#cccccc">
-                    </div>
-                    <div class="settings-row">
-                        <label>Text (Dim)</label>
-                        <input type="color" data-setting="textDim" value="#858585">
-                    </div>
-                </div>
-            </div>
-
-            <div class="settings-section">
-                <h3>Presets</h3>
-                <div class="settings-presets">
-                    <button class="preset-btn" data-preset="xbox" title="Xbox Green">🟢 Xbox Green</button>
-                    <button class="preset-btn" data-preset="red" title="Red Ring">🔴 Red Ring</button>
-                    <button class="preset-btn" data-preset="blue" title="Blue Steel">🔵 Blue Steel</button>
-                    <button class="preset-btn" data-preset="purple" title="Purple Haze">🟣 Purple Haze</button>
-                    <button class="preset-btn" data-preset="orange" title="Sunset">🟠 Sunset</button>
-                    <button class="preset-btn" data-preset="mono" title="Monochrome">⚪ Monochrome</button>
-                </div>
-            </div>
-
-            <div class="dialog-buttons">
-                <button id="settings-open-setup" class="setup-btn">SDK Setup...</button>
-                <button id="settings-retake-tour" class="setup-btn">Retake UI Tour</button>
-                <button id="settings-reset" class="setup-btn-secondary">Reset Theme</button>
-                <button id="settings-reset-learning" class="setup-btn-secondary btn-warn">Reset Learning Progress</button>
-                <button id="settings-factory-reset" class="setup-btn-secondary btn-danger">Factory Reset</button>
-                <button id="settings-close" class="setup-btn-primary">Done</button>
-            </div>
-        </div>
-    </div>
+    <!-- Settings panel is now dynamically generated by showSettingsPanel() in app.ts -->
 
     <!-- Onboarding Wizard -->
     <div id="onboarding-overlay" class="overlay hidden">
@@ -580,8 +986,28 @@
                 <button class="ob-btn-primary" id="ob-next-1">Let's Get Started →</button>
             </div>
 
-            <!-- Step 2: Skill Level -->
+            <!-- Step 2: Account -->
             <div class="ob-step" data-step="2">
+                <h2 class="ob-title">Sign In to <span class="ob-accent">Nexia</span></h2>
+                <p class="ob-desc">Create an account or sign in to access cloud lessons, sync progress, and unlock admin features.</p>
+                <div id="ob-auth-status" style="margin:16px 0;padding:12px 16px;border-radius:8px;background:rgba(78,201,176,0.06);border:1px solid rgba(78,201,176,0.15);display:none">
+                    <div style="display:flex;align-items:center;gap:8px">
+                        <div id="ob-auth-avatar" style="width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:#0e0e14;background:#4ec9b0"></div>
+                        <div>
+                            <div id="ob-auth-name" style="font-size:13px;font-weight:600;color:var(--text)"></div>
+                            <div id="ob-auth-role" style="font-size:10px;font-weight:700;letter-spacing:0.5px;color:#4ec9b0"></div>
+                        </div>
+                    </div>
+                </div>
+                <div id="ob-auth-buttons" style="display:flex;gap:10px;justify-content:center;margin:20px 0">
+                    <button class="ob-btn-primary" id="ob-signin">Sign In</button>
+                    <button class="ob-btn-secondary" id="ob-register">Create Account</button>
+                </div>
+                <button class="ob-btn-secondary" id="ob-skip-auth" style="margin-top:8px">Skip for now →</button>
+            </div>
+
+            <!-- Step 3: Skill Level -->
+            <div class="ob-step" data-step="3">
                 <h2 class="ob-title">What's your experience level?</h2>
                 <p class="ob-desc">This helps us tailor tips and guidance to you.</p>
                 <div class="ob-skill-cards">
@@ -603,8 +1029,8 @@
                 </div>
             </div>
 
-            <!-- Step 3: Features Tour -->
-            <div class="ob-step" data-step="3">
+            <!-- Step 4: Features Tour -->
+            <div class="ob-step" data-step="4">
                 <h2 class="ob-title">Here's what you can do</h2>
                 <div class="ob-features">
                     <div class="ob-feature"><span class="ob-feature-icon">📝</span><div><strong>Write Code</strong><br>Full C++ editor with syntax highlighting, IntelliSense, and Xbox 360 SDK support.</div></div>
@@ -612,7 +1038,7 @@
                     <div class="ob-feature"><span class="ob-feature-icon">📡</span><div><strong>Deploy to Hardware</strong><br>Send your compiled .XEX directly to a development kit over the network.</div></div>
                     <div class="ob-feature"><span class="ob-feature-icon">🎓</span><div><strong>Learn as You Go</strong><br>Guided curriculum, real-time tips, and achievements to track your progress.</div></div>
                 </div>
-                <button class="ob-btn-primary" id="ob-next-3">Start Building →</button>
+                <button class="ob-btn-primary" id="ob-next-4">Start Building →</button>
                 <button class="ob-btn-secondary" id="ob-skip">Skip Tour</button>
             </div>
 
@@ -621,6 +1047,7 @@
                 <span class="ob-dot active" data-dot="1"></span>
                 <span class="ob-dot" data-dot="2"></span>
                 <span class="ob-dot" data-dot="3"></span>
+                <span class="ob-dot" data-dot="4"></span>
             </div>
         </div>
     </div>
@@ -746,69 +1173,6 @@
     </div>
 
     <!-- AI Settings Dialog -->
-    <div id="ai-settings-overlay" class="overlay hidden">
-        <div id="ai-settings-dialog" class="dialog-box dialog-md">
-            <h2>🤖 AI Settings</h2>
-            <div class="dialog-field">
-                <label>AI Provider</label>
-                <select id="ai-provider" class="dialog-select">
-                    <option value="anthropic">Anthropic (Claude)</option>
-                    <option value="openai">OpenAI (GPT)</option>
-                    <option value="local">Local / Ollama</option>
-                    <option value="custom">Custom Endpoint</option>
-                </select>
-            </div>
-            <div class="dialog-field">
-                <label>API Key</label>
-                <div class="ai-key-row">
-                    <input type="password" id="ai-api-key" placeholder="sk-... or your API key">
-                    <button id="ai-key-toggle" class="setup-btn">Show</button>
-                </div>
-            </div>
-            <div id="ai-custom-endpoint" class="dialog-field hidden">
-                <label>Custom API Endpoint</label>
-                <input type="text" id="ai-endpoint-url" placeholder="http://localhost:11434/v1/chat/completions">
-            </div>
-            <div class="dialog-field">
-                <label>Model</label>
-                <input type="text" id="ai-model" placeholder="Leave blank for default (e.g. gpt-4o, claude-sonnet-4-20250514, llama3)">
-            </div>
-            <div class="dialog-field">
-                <label>System Context</label>
-                <textarea id="ai-system-prompt" class="dialog-textarea" rows="3" placeholder="Custom instructions for the AI (optional). The Xbox 360 development context is always included."></textarea>
-            </div>
-            <div class="settings-section">
-                <h3>Behavior</h3>
-                <div class="settings-row">
-                    <label>Auto-analyze build errors</label>
-                    <label class="toggle-switch">
-                        <input type="checkbox" id="ai-auto-errors" checked>
-                        <span class="toggle-slider"></span>
-                    </label>
-                </div>
-                <div class="settings-row">
-                    <label>Inline code suggestions</label>
-                    <label class="toggle-switch">
-                        <input type="checkbox" id="ai-inline-suggest">
-                        <span class="toggle-slider"></span>
-                    </label>
-                </div>
-                <div class="settings-row">
-                    <label>Include open file as context</label>
-                    <label class="toggle-switch">
-                        <input type="checkbox" id="ai-file-context" checked>
-                        <span class="toggle-slider"></span>
-                    </label>
-                </div>
-            </div>
-            <div class="dialog-buttons">
-                <button id="ai-test-connection" class="setup-btn">🔌 Test Connection</button>
-                <button id="ai-settings-cancel" class="setup-btn-secondary">Cancel</button>
-                <button id="ai-settings-save" class="setup-btn-primary">Save</button>
-            </div>
-        </div>
-    </div>
-
     <!-- AI Selection Hint Bar (floats above selected text in editor) -->
     <div id="ai-hint-bar" class="ai-hint-bar hidden">
         <button class="ai-hint-btn" data-action="explain" title="Explain this code">

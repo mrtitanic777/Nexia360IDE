@@ -173,6 +173,8 @@ function registerIpcHandlers() {
             sdkConfigured: !!toolchain.getPaths(),
             sdkPaths: toolchain.getPaths(),
             sdkBundled: toolchain.isBundled(),
+            sdkInstallState: toolchain.detectInstallState(),
+            sdkPartialPath: toolchain.getPartialInstallPath(),
             recentProjects: getRecentProjects(),
             firstRun: !settings.setupComplete,
             projectsDir: PROJECTS_DIR,
@@ -204,6 +206,21 @@ function registerIpcHandlers() {
 
     ipcMain.handle(IPC.SDK_GET_PATHS, async () => toolchain.getPaths());
     ipcMain.handle(IPC.SDK_GET_TOOLS, async () => toolchain.getToolInventory());
+
+    ipcMain.handle(IPC.SDK_INSTALL_STATE, async () => {
+        return {
+            state: toolchain.detectInstallState(),
+            partialPath: toolchain.getPartialInstallPath(),
+        };
+    });
+
+    ipcMain.handle(IPC.SDK_PREP_REGISTRY, async () => {
+        return toolchain.prepSdkRegistry();
+    });
+
+    ipcMain.handle(IPC.SDK_CLEANUP_REGISTRY, async () => {
+        return toolchain.cleanupSdkRegistry();
+    });
 
     // ── Project ──
     ipcMain.handle(IPC.PROJECT_GET_TEMPLATES, async () => projectManager.getTemplates());
@@ -501,6 +518,10 @@ function registerIpcHandlers() {
         return devkitManager.listFiles(remotePath, ip);
     });
 
+    ipcMain.handle(IPC.DEVKIT_COPY_TO, async (_e, localPath: string, remotePath: string, ip?: string) => {
+        return devkitManager.copyTo(localPath, remotePath, ip);
+    });
+
     // ── Emulator ──
     ipcMain.handle(IPC.EMU_CONFIGURE, async (_e, emulatorPath: string) => {
         emulatorManager.configure(emulatorPath);
@@ -664,6 +685,19 @@ function registerIpcHandlers() {
         return { success: true };
     });
 
+    ipcMain.handle(IPC.DISCORD_CHECK_GUILDS, async () => {
+        try {
+            const guilds = await discordFeed.fetchUserGuilds();
+            const NEXIA_SERVER_NAME = 'The Official Nexia Server';
+            const found = guilds.some((g: any) =>
+                g.name === NEXIA_SERVER_NAME || g.name?.toLowerCase() === NEXIA_SERVER_NAME.toLowerCase()
+            );
+            return { success: true, inNexiaServer: found, guilds: guilds.map((g: any) => g.name) };
+        } catch (err: any) {
+            return { success: false, inNexiaServer: false, error: err.message };
+        }
+    });
+
     ipcMain.handle(IPC.DISCORD_DOWNLOAD, async (_e, url: string, filename: string) => {
         // Validate URL is from Discord CDN to prevent arbitrary downloads
         const allowedHosts = ['cdn.discordapp.com', 'media.discordapp.net'];
@@ -684,6 +718,354 @@ function registerIpcHandlers() {
         }
         return result;
     });
+
+    // ── Lesson Package Handlers ──
+    const lessonsDir = path.join(app.isPackaged ? path.dirname(process.execPath) : path.join(__dirname, '..', '..'), 'lessons');
+
+    ipcMain.handle(IPC.LESSON_GET_DIR, async () => {
+        if (!fs.existsSync(lessonsDir)) fs.mkdirSync(lessonsDir, { recursive: true });
+        return lessonsDir;
+    });
+
+    ipcMain.handle(IPC.LESSON_LIST, async () => {
+        if (!fs.existsSync(lessonsDir)) fs.mkdirSync(lessonsDir, { recursive: true });
+        const registryPath = path.join(lessonsDir, 'registry.json');
+        try {
+            if (fs.existsSync(registryPath)) {
+                return JSON.parse(fs.readFileSync(registryPath, 'utf-8'));
+            }
+        } catch {}
+        return [];
+    });
+
+    ipcMain.handle(IPC.LESSON_IMPORT, async () => {
+        const result = await dialog.showOpenDialog(mainWindow!, {
+            title: 'Import Cinematic Lesson',
+            filters: [{ name: 'Nexia Lesson Package', extensions: ['lesson'] }],
+            properties: ['openFile'],
+        });
+        if (result.canceled || !result.filePaths.length) return { success: false, error: 'Cancelled' };
+
+        const srcPath = result.filePaths[0];
+        try {
+            // .lesson is a zip — extract it
+            if (!fs.existsSync(lessonsDir)) fs.mkdirSync(lessonsDir, { recursive: true });
+
+            // Read the zip
+            const zipBuf = fs.readFileSync(srcPath);
+
+            // Simple zip extraction using Node's built-in zlib + manual parsing
+            // For robustness we'll use a temp approach: copy .lesson, rename to .zip, use AdmZip-like manual extraction
+            // Actually, since we're in Electron/Node, let's use child_process to call tar or use a simple approach
+            // We'll parse the zip manually using the central directory
+
+            // Simpler approach: use the 'unzipper' pattern with raw Node
+            // But to keep deps minimal, let's just copy the file and read the JSON from it
+            // The .lesson format: it's a zip, but we can also support a simple directory-based approach
+
+            // For v1: treat .lesson as a renamed zip. Extract using Node's built-in zlib for deflate entries.
+            const lessonEntries = extractNxLesson(zipBuf);
+            if (!lessonEntries['lesson.json']) {
+                return { success: false, error: 'Invalid .lesson: missing lesson.json' };
+            }
+
+            const lessonData = JSON.parse(lessonEntries['lesson.json']);
+            const lessonId = lessonData.meta?.id || path.basename(srcPath, '.lesson');
+            const lessonDir = path.join(lessonsDir, lessonId);
+
+            if (!fs.existsSync(lessonDir)) fs.mkdirSync(lessonDir, { recursive: true });
+
+            // Write all extracted files
+            for (const [name, content] of Object.entries(lessonEntries)) {
+                const filePath = path.join(lessonDir, name);
+                const dir = path.dirname(filePath);
+                if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+                fs.writeFileSync(filePath, content as string, typeof content === 'string' ? 'utf-8' : undefined);
+            }
+
+            // Update registry
+            const registryPath = path.join(lessonsDir, 'registry.json');
+            let registry: any[] = [];
+            try { if (fs.existsSync(registryPath)) registry = JSON.parse(fs.readFileSync(registryPath, 'utf-8')); } catch {}
+
+            // Remove existing entry with same ID
+            registry = registry.filter((r: any) => r.id !== lessonId);
+            registry.push({
+                id: lessonId,
+                title: lessonData.meta?.title || lessonId,
+                description: lessonData.meta?.description || '',
+                difficulty: lessonData.meta?.difficulty || 'beginner',
+                author: lessonData.meta?.author || 'Unknown',
+                version: lessonData.meta?.version || '1.0.0',
+                path: lessonDir,
+                importedAt: new Date().toISOString(),
+            });
+            fs.writeFileSync(registryPath, JSON.stringify(registry, null, 2));
+
+            return { success: true, lessonId, title: lessonData.meta?.title };
+        } catch (err: any) {
+            return { success: false, error: err.message || 'Import failed' };
+        }
+    });
+
+    ipcMain.handle(IPC.LESSON_READ, async (_e, lessonId: string) => {
+        const lessonDir = path.join(lessonsDir, lessonId);
+        const jsonPath = path.join(lessonDir, 'lesson.json');
+        if (!fs.existsSync(jsonPath)) return null;
+        try {
+            const data = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'));
+
+            // V1 compat: load single visualizers.js if present
+            const visPath = path.join(lessonDir, 'visualizers.js');
+            if (fs.existsSync(visPath)) {
+                data._visualizerCode = fs.readFileSync(visPath, 'utf-8');
+            }
+
+            // V2: load visualizer JS files from visualizers/ directory
+            // and embed them as _loadedVisualizers so the renderer can eval them
+            const visDir = path.join(lessonDir, 'visualizers');
+            if (fs.existsSync(visDir)) {
+                const visFiles: Record<string, string> = {};
+                const files = fs.readdirSync(visDir);
+                for (const f of files) {
+                    if (f.endsWith('.js')) {
+                        visFiles[f] = fs.readFileSync(path.join(visDir, f), 'utf-8');
+                    }
+                }
+                if (Object.keys(visFiles).length > 0) {
+                    data._visualizerFiles = visFiles;
+                }
+            }
+
+            // Pass the base path so the renderer can resolve relative asset paths
+            data._basePath = lessonDir;
+
+            return data;
+        } catch { return null; }
+    });
+
+    // Save edited lesson data back to disk
+    ipcMain.handle('lesson:save', async (_e, lessonId: string, lessonData: any) => {
+        const lessonDir = path.join(lessonsDir, lessonId);
+        const jsonPath = path.join(lessonDir, 'lesson.json');
+        try {
+            if (!fs.existsSync(lessonDir)) fs.mkdirSync(lessonDir, { recursive: true });
+            fs.writeFileSync(jsonPath, JSON.stringify(lessonData, null, 2));
+
+            // Update registry metadata
+            const registryPath = path.join(lessonsDir, 'registry.json');
+            let registry: any[] = [];
+            try { if (fs.existsSync(registryPath)) registry = JSON.parse(fs.readFileSync(registryPath, 'utf-8')); } catch {}
+            const idx = registry.findIndex((r: any) => r.id === lessonId);
+            const entry = {
+                id: lessonId,
+                title: lessonData.meta?.title || lessonId,
+                description: lessonData.meta?.description || '',
+                difficulty: lessonData.meta?.difficulty || 'beginner',
+                author: lessonData.meta?.author || 'Unknown',
+                version: lessonData.meta?.version || '1.0.0',
+                path: lessonDir,
+                importedAt: idx >= 0 ? registry[idx].importedAt : new Date().toISOString(),
+                updatedAt: new Date().toISOString(),
+            };
+            if (idx >= 0) registry[idx] = entry; else registry.push(entry);
+            fs.writeFileSync(registryPath, JSON.stringify(registry, null, 2));
+
+            return { success: true };
+        } catch (err: any) {
+            return { success: false, error: err.message };
+        }
+    });
+
+    ipcMain.handle(IPC.LESSON_DELETE, async (_e, lessonId: string) => {
+        const lessonDir = path.join(lessonsDir, lessonId);
+        try {
+            if (fs.existsSync(lessonDir)) fs.rmSync(lessonDir, { recursive: true, force: true });
+            // Update registry
+            const registryPath = path.join(lessonsDir, 'registry.json');
+            let registry: any[] = [];
+            try { if (fs.existsSync(registryPath)) registry = JSON.parse(fs.readFileSync(registryPath, 'utf-8')); } catch {}
+            registry = registry.filter((r: any) => r.id !== lessonId);
+            fs.writeFileSync(registryPath, JSON.stringify(registry, null, 2));
+            return { success: true };
+        } catch (err: any) {
+            return { success: false, error: err.message };
+        }
+    });
+
+    ipcMain.handle(IPC.LESSON_EXPORT, async (_e, lessonData: any) => {
+        const result = await dialog.showSaveDialog(mainWindow!, {
+            title: 'Export Cinematic Lesson',
+            defaultPath: (lessonData.meta?.id || 'lesson') + '.lesson',
+            filters: [{ name: 'Nexia Lesson Package', extensions: ['lesson'] }],
+        });
+        if (result.canceled || !result.filePath) return { success: false, error: 'Cancelled' };
+
+        try {
+            const zipBuf = buildNxLesson(lessonData);
+            fs.writeFileSync(result.filePath, zipBuf);
+            shell.showItemInFolder(result.filePath);
+            return { success: true, path: result.filePath };
+        } catch (err: any) {
+            return { success: false, error: err.message };
+        }
+    });
+}
+
+// ── .lesson Zip Utilities ──
+// Minimal zip creator/extractor — no external dependencies
+
+function buildNxLesson(lessonData: any): Buffer {
+    const files: { name: string; data: Buffer }[] = [];
+
+    // Separate visualizer code if present
+    const visCode = lessonData._visualizerCode;
+    const cleanData = { ...lessonData };
+    delete cleanData._visualizerCode;
+
+    files.push({ name: 'lesson.json', data: Buffer.from(JSON.stringify(cleanData, null, 2), 'utf-8') });
+    if (visCode) {
+        files.push({ name: 'visualizers.js', data: Buffer.from(visCode, 'utf-8') });
+    }
+
+    return createZipBuffer(files);
+}
+
+function extractNxLesson(zipBuf: Buffer): Record<string, string> {
+    const entries: Record<string, string> = {};
+    // Parse zip central directory
+    // Find end of central directory record (signature 0x06054b50)
+    let eocdOffset = -1;
+    for (let i = zipBuf.length - 22; i >= 0; i--) {
+        if (zipBuf.readUInt32LE(i) === 0x06054b50) { eocdOffset = i; break; }
+    }
+    if (eocdOffset === -1) throw new Error('Invalid zip: no end of central directory');
+
+    const cdOffset = zipBuf.readUInt32LE(eocdOffset + 16);
+    const cdEntries = zipBuf.readUInt16LE(eocdOffset + 10);
+
+    let pos = cdOffset;
+    for (let e = 0; e < cdEntries; e++) {
+        if (zipBuf.readUInt32LE(pos) !== 0x02014b50) break;
+        const compMethod = zipBuf.readUInt16LE(pos + 10);
+        const compSize = zipBuf.readUInt32LE(pos + 20);
+        const uncompSize = zipBuf.readUInt32LE(pos + 24);
+        const nameLen = zipBuf.readUInt16LE(pos + 28);
+        const extraLen = zipBuf.readUInt16LE(pos + 30);
+        const commentLen = zipBuf.readUInt16LE(pos + 32);
+        const localOffset = zipBuf.readUInt32LE(pos + 42);
+        const name = zipBuf.slice(pos + 46, pos + 46 + nameLen).toString('utf-8');
+        pos += 46 + nameLen + extraLen + commentLen;
+
+        if (name.endsWith('/')) continue; // skip directories
+
+        // Read local file header to get to actual data
+        const localNameLen = zipBuf.readUInt16LE(localOffset + 26);
+        const localExtraLen = zipBuf.readUInt16LE(localOffset + 28);
+        const dataOffset = localOffset + 30 + localNameLen + localExtraLen;
+
+        let fileData: Buffer;
+        if (compMethod === 0) {
+            // Stored (no compression)
+            fileData = zipBuf.slice(dataOffset, dataOffset + compSize);
+        } else if (compMethod === 8) {
+            // Deflated
+            const zlib = require('zlib');
+            fileData = zlib.inflateRawSync(zipBuf.slice(dataOffset, dataOffset + compSize));
+        } else {
+            continue; // skip unsupported compression
+        }
+
+        entries[name] = fileData.toString('utf-8');
+    }
+    return entries;
+}
+
+function createZipBuffer(files: { name: string; data: Buffer }[]): Buffer {
+    const zlib = require('zlib');
+    const localHeaders: Buffer[] = [];
+    const centralEntries: Buffer[] = [];
+    let offset = 0;
+
+    for (const file of files) {
+        const nameB = Buffer.from(file.name, 'utf-8');
+        const compressed = zlib.deflateRawSync(file.data);
+        const useStore = compressed.length >= file.data.length;
+        const dataToWrite = useStore ? file.data : compressed;
+        const method = useStore ? 0 : 8;
+
+        // CRC32
+        const crc = crc32(file.data);
+
+        // Local file header
+        const local = Buffer.alloc(30 + nameB.length);
+        local.writeUInt32LE(0x04034b50, 0); // signature
+        local.writeUInt16LE(20, 4); // version needed
+        local.writeUInt16LE(0, 6); // flags
+        local.writeUInt16LE(method, 8);
+        local.writeUInt16LE(0, 10); // mod time
+        local.writeUInt16LE(0, 12); // mod date
+        local.writeUInt32LE(crc, 14);
+        local.writeUInt32LE(dataToWrite.length, 18); // compressed size
+        local.writeUInt32LE(file.data.length, 22); // uncompressed size
+        local.writeUInt16LE(nameB.length, 26);
+        local.writeUInt16LE(0, 28); // extra length
+        nameB.copy(local, 30);
+
+        localHeaders.push(local);
+        localHeaders.push(dataToWrite);
+
+        // Central directory entry
+        const central = Buffer.alloc(46 + nameB.length);
+        central.writeUInt32LE(0x02014b50, 0);
+        central.writeUInt16LE(20, 4); // version made by
+        central.writeUInt16LE(20, 6); // version needed
+        central.writeUInt16LE(0, 8); // flags
+        central.writeUInt16LE(method, 10);
+        central.writeUInt16LE(0, 12); // mod time
+        central.writeUInt16LE(0, 14); // mod date
+        central.writeUInt32LE(crc, 16);
+        central.writeUInt32LE(dataToWrite.length, 20);
+        central.writeUInt32LE(file.data.length, 24);
+        central.writeUInt16LE(nameB.length, 28);
+        central.writeUInt16LE(0, 30); // extra length
+        central.writeUInt16LE(0, 32); // comment length
+        central.writeUInt16LE(0, 34); // disk start
+        central.writeUInt16LE(0, 36); // internal attrs
+        central.writeUInt32LE(0, 38); // external attrs
+        central.writeUInt32LE(offset, 42); // local header offset
+        nameB.copy(central, 46);
+        centralEntries.push(central);
+
+        offset += local.length + dataToWrite.length;
+    }
+
+    const cdOffset = offset;
+    const cdSize = centralEntries.reduce((s, b) => s + b.length, 0);
+
+    // End of central directory
+    const eocd = Buffer.alloc(22);
+    eocd.writeUInt32LE(0x06054b50, 0);
+    eocd.writeUInt16LE(0, 4); // disk
+    eocd.writeUInt16LE(0, 6); // disk with cd
+    eocd.writeUInt16LE(files.length, 8);
+    eocd.writeUInt16LE(files.length, 10);
+    eocd.writeUInt32LE(cdSize, 12);
+    eocd.writeUInt32LE(cdOffset, 16);
+    eocd.writeUInt16LE(0, 20); // comment length
+
+    return Buffer.concat([...localHeaders, ...centralEntries, eocd]);
+}
+
+function crc32(buf: Buffer): number {
+    let crc = 0xFFFFFFFF;
+    for (let i = 0; i < buf.length; i++) {
+        crc ^= buf[i];
+        for (let j = 0; j < 8; j++) {
+            crc = (crc >>> 1) ^ (crc & 1 ? 0xEDB88320 : 0);
+        }
+    }
+    return (crc ^ 0xFFFFFFFF) >>> 0;
 }
 
 // ── XEX2 Binary Parser ──

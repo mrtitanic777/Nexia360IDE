@@ -82,11 +82,11 @@ export class DiscordFeed {
 
     constructor(config?: Partial<DiscordConfig>) {
         this.config = {
-            botToken: config?.botToken || '',
+            botToken: config?.botToken || process.env.NEXIA_DISCORD_BOT_TOKEN || '',
             channelId: config?.channelId || '1459211832437903380', // Nexia Discord: software-tools forum
-            clientId: config?.clientId || '',
-            clientSecret: config?.clientSecret || '',
-            enabled: config?.enabled ?? false,
+            clientId: config?.clientId || '1471724753730408622',
+            clientSecret: config?.clientSecret || process.env.NEXIA_DISCORD_CLIENT_SECRET || '',
+            enabled: config?.enabled ?? true,
         };
     }
 
@@ -143,7 +143,7 @@ export class DiscordFeed {
             client_id: this.config.clientId,
             redirect_uri: DiscordFeed.REDIRECT_URI,
             response_type: 'code',
-            scope: 'identify',
+            scope: 'identify guilds',
         });
         return `https://discord.com/oauth2/authorize?${params.toString()}`;
     }
@@ -181,14 +181,19 @@ export class DiscordFeed {
                         // Fetch user info
                         const userInfo = await this.fetchUserInfo(tokenData.access_token);
 
+                        const avatarCdnUrl = userInfo.avatar
+                                ? `https://cdn.discordapp.com/avatars/${userInfo.id}/${userInfo.avatar}.${userInfo.avatar.startsWith('a_') ? 'gif' : 'png'}?size=128`
+                                : `https://cdn.discordapp.com/embed/avatars/${(BigInt(userInfo.id) >> 22n) % 6n}.png`;
+
+                        // Download avatar via Node https so it works on Windows 7
+                        const avatarDataUrl = await this.fetchImageAsDataUrl(avatarCdnUrl);
+
                         const user: DiscordUser = {
                             id: userInfo.id,
                             username: userInfo.username,
                             discriminator: userInfo.discriminator || '0',
                             avatar: userInfo.avatar,
-                            avatarUrl: userInfo.avatar
-                                ? `https://cdn.discordapp.com/avatars/${userInfo.id}/${userInfo.avatar}.png?size=64`
-                                : null,
+                            avatarUrl: avatarDataUrl || avatarCdnUrl,
                             accessToken: tokenData.access_token,
                         };
 
@@ -301,6 +306,76 @@ export class DiscordFeed {
     }
 
     /**
+     * Fetch the guilds (servers) the authenticated user belongs to.
+     * Requires the 'guilds' OAuth2 scope.
+     */
+    fetchUserGuilds(): Promise<any[]> {
+        const user = this.authUser;
+        if (!user?.accessToken) return Promise.resolve([]);
+
+        return new Promise((resolve, reject) => {
+            const options = {
+                hostname: DISCORD_API,
+                path: API_VERSION + '/users/@me/guilds',
+                method: 'GET',
+                headers: {
+                    'Authorization': `Bearer ${user.accessToken}`,
+                    'User-Agent': 'NexiaIDE (https://github.com/nexia-ide, 1.0)',
+                },
+            };
+
+            const req = https.request(options, (res) => {
+                let data = '';
+                res.on('data', (chunk: string) => data += chunk);
+                res.on('end', () => {
+                    try {
+                        const json = JSON.parse(data);
+                        if (res.statusCode && res.statusCode >= 400) reject(new Error(json.message || 'Failed'));
+                        else resolve(Array.isArray(json) ? json : []);
+                    } catch { reject(new Error('Failed to fetch guilds')); }
+                });
+            });
+            req.on('error', reject);
+            req.end();
+        });
+    }
+
+    /**
+     * Download an image URL via Node's https and return a base64 data URI.
+     * This bypasses Chromium's network stack which fails on Windows 7 TLS.
+     */
+    fetchImageAsDataUrl(imageUrl: string): Promise<string | null> {
+        return new Promise((resolve) => {
+            try {
+                const parsed = new URL(imageUrl);
+                const req = https.request({
+                    hostname: parsed.hostname,
+                    path: parsed.pathname + parsed.search,
+                    method: 'GET',
+                    headers: { 'User-Agent': 'NexiaIDE' },
+                }, (res) => {
+                    // Follow redirects
+                    if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+                        this.fetchImageAsDataUrl(res.headers.location).then(resolve);
+                        return;
+                    }
+                    if (res.statusCode && res.statusCode >= 400) { resolve(null); return; }
+                    const chunks: Buffer[] = [];
+                    res.on('data', (chunk: Buffer) => chunks.push(chunk));
+                    res.on('end', () => {
+                        const buffer = Buffer.concat(chunks);
+                        const contentType = res.headers['content-type'] || 'image/png';
+                        resolve(`data:${contentType};base64,${buffer.toString('base64')}`);
+                    });
+                });
+                req.on('error', () => resolve(null));
+                req.setTimeout(10000, () => { req.destroy(); resolve(null); });
+                req.end();
+            } catch { resolve(null); }
+        });
+    }
+
+    /**
      * Log out the current user.
      */
     logout() {
@@ -348,8 +423,10 @@ export class DiscordFeed {
                         name: thread.name || 'Untitled',
                         authorName: firstMsg?.author?.username || thread.owner_id || 'Unknown',
                         authorAvatar: firstMsg?.author?.avatar
-                            ? `https://cdn.discordapp.com/avatars/${firstMsg.author.id}/${firstMsg.author.avatar}.png?size=32`
-                            : null,
+                            ? `https://cdn.discordapp.com/avatars/${firstMsg.author.id}/${firstMsg.author.avatar}.${firstMsg.author.avatar.startsWith('a_') ? 'gif' : 'png'}?size=64`
+                            : firstMsg?.author?.id
+                                ? `https://cdn.discordapp.com/embed/avatars/${(BigInt(firstMsg.author.id) >> 22n) % 6n}.png`
+                                : null,
                         createdAt: thread.thread_metadata?.create_timestamp
                             || new Date(Number(BigInt(thread.id) >> 22n) + 1420070400000).toISOString(),
                         messageCount: thread.message_count || 0,
@@ -500,8 +577,10 @@ export class DiscordFeed {
             content: msg.content || '',
             authorName: msg.author?.username || 'Unknown',
             authorAvatar: msg.author?.avatar
-                ? `https://cdn.discordapp.com/avatars/${msg.author.id}/${msg.author.avatar}.png?size=32`
-                : null,
+                ? `https://cdn.discordapp.com/avatars/${msg.author.id}/${msg.author.avatar}.${msg.author.avatar.startsWith('a_') ? 'gif' : 'png'}?size=64`
+                : msg.author?.id
+                    ? `https://cdn.discordapp.com/embed/avatars/${(BigInt(msg.author.id) >> 22n) % 6n}.png`
+                    : null,
             authorIsBot: !!msg.author?.bot,
             createdAt: msg.timestamp || new Date(Number(BigInt(msg.id) >> 22n) + 1420070400000).toISOString(),
             editedAt: msg.edited_timestamp || null,

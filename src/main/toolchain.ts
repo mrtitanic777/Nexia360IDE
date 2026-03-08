@@ -5,6 +5,7 @@
 
 import * as path from 'path';
 import * as fs from 'fs';
+import { execSync } from 'child_process';
 import { SdkPaths, SdkTool } from '../shared/types';
 
 export class Toolchain {
@@ -55,6 +56,22 @@ export class Toolchain {
         if (bundled) {
             candidates.push({ path: bundled, bundled: true });
         }
+
+        // Installer-extracted SDK: same directory as the exe
+        // The installer's cab extraction preserves the XDK\ prefix from Microsoft's SDK cabs
+        // so the structure is: <install_dir>\SDK\XDK\bin\, SDK\XDK\include\, etc.
+        const exeDir = path.dirname(process.execPath);
+        candidates.push({ path: path.join(exeDir, 'SDK', 'XDK'), bundled: true });
+        candidates.push({ path: path.join(exeDir, 'sdk', 'XDK'), bundled: true });
+        candidates.push({ path: path.join(exeDir, 'SDK'), bundled: true });
+        candidates.push({ path: path.join(exeDir, 'sdk'), bundled: true });
+        candidates.push({ path: path.join(exeDir, '..', 'SDK', 'XDK'), bundled: true });
+        candidates.push({ path: path.join(exeDir, '..', 'SDK'), bundled: true });
+
+        // Standard installer paths (NexiaSetup.exe extracts here)
+        candidates.push({ path: 'C:\\Program Files\\NexiaIDE\\SDK\\XDK', bundled: true });
+        candidates.push({ path: 'C:\\Program Files\\NexiaIDE\\SDK', bundled: true });
+        candidates.push({ path: 'C:\\Program Files (x86)\\NexiaIDE\\SDK\\XDK', bundled: true });
 
         // Environment variables
         const envVars = ['XEDK', 'XEDK_DIR', 'XBOX_SDK', 'XDK'];
@@ -181,7 +198,14 @@ export class Toolchain {
             const binDirs = this.getBinDirectories();
             env.PATH = binDirs.join(path.delimiter) + path.delimiter + (env.PATH || '');
             env.XEDK = this.sdkPaths.root;
-            env.INCLUDE = this.sdkPaths.include + path.delimiter + (env.INCLUDE || '');
+            // Xbox-specific headers must come first in INCLUDE to prevent
+            // cl.exe from finding Source\crt\ internal headers
+            const xboxInc = path.join(this.sdkPaths.include, 'xbox');
+            if (fs.existsSync(xboxInc)) {
+                env.INCLUDE = xboxInc + path.delimiter + this.sdkPaths.include + path.delimiter + (env.INCLUDE || '');
+            } else {
+                env.INCLUDE = this.sdkPaths.include + path.delimiter + (env.INCLUDE || '');
+            }
             env.LIB = path.join(this.sdkPaths.lib, 'xbox') + path.delimiter + (env.LIB || '');
         }
         return env;
@@ -221,6 +245,259 @@ export class Toolchain {
             missing,
             hint: 'Copy msvcr100.dll and msvcp100.dll from C:\\Windows\\SysWOW64 into the sdk\\bin\\win32 folder, then rebuild the IDE.',
         };
+    }
+
+    /**
+     * Detect a partial SDK installation — has bin/ but missing include/ and lib/.
+     * This happens when the Xbox 360 SDK installer runs without VS2010 detected,
+     * which limits it to a "Minimum Installation" that omits headers and libraries.
+     *
+     * Returns:
+     *   - 'none'    — No SDK found at all
+     *   - 'partial' — SDK found with bin/ but missing include/ or lib/
+     *   - 'full'    — SDK found with all required directories
+     */
+    detectInstallState(): 'none' | 'partial' | 'full' {
+        // Check all candidate paths (same order as detect())
+        const candidates: string[] = [];
+
+        // Environment variables
+        for (const v of ['XEDK', 'XEDK_DIR', 'XBOX_SDK', 'XDK']) {
+            if (process.env[v]) candidates.push(process.env[v]!);
+        }
+
+        // Common install paths
+        candidates.push(
+            'C:\\Program Files (x86)\\Microsoft Xbox 360 SDK',
+            'C:\\Program Files\\Microsoft Xbox 360 SDK',
+            'D:\\Microsoft Xbox 360 SDK',
+            'C:\\XEDK',
+            'D:\\XEDK',
+            'C:\\Program Files (x86)\\Microsoft Xbox SDK',
+        );
+
+        // Bundled SDK
+        const bundled = this.getBundledSdkPath();
+        if (bundled) candidates.unshift(bundled);
+
+        for (const sdkPath of candidates) {
+            if (!sdkPath || !fs.existsSync(sdkPath)) continue;
+
+            const hasBin = fs.existsSync(path.join(sdkPath, 'bin'));
+            const hasInclude = fs.existsSync(path.join(sdkPath, 'include'));
+            const hasLib = fs.existsSync(path.join(sdkPath, 'lib'));
+
+            if (hasBin && hasInclude && hasLib) return 'full';
+            if (hasBin && (!hasInclude || !hasLib)) return 'partial';
+        }
+
+        return 'none';
+    }
+
+    /**
+     * Get the path of a detected partial SDK install (for display purposes).
+     */
+    getPartialInstallPath(): string | null {
+        const candidates: string[] = [];
+
+        for (const v of ['XEDK', 'XEDK_DIR', 'XBOX_SDK', 'XDK']) {
+            if (process.env[v]) candidates.push(process.env[v]!);
+        }
+
+        candidates.push(
+            'C:\\Program Files (x86)\\Microsoft Xbox 360 SDK',
+            'C:\\Program Files\\Microsoft Xbox 360 SDK',
+            'D:\\Microsoft Xbox 360 SDK',
+            'C:\\XEDK',
+            'D:\\XEDK',
+            'C:\\Program Files (x86)\\Microsoft Xbox SDK',
+        );
+
+        for (const sdkPath of candidates) {
+            if (!sdkPath || !fs.existsSync(sdkPath)) continue;
+            const hasBin = fs.existsSync(path.join(sdkPath, 'bin'));
+            const hasInclude = fs.existsSync(path.join(sdkPath, 'include'));
+            if (hasBin && !hasInclude) return sdkPath;
+        }
+        return null;
+    }
+
+    /**
+     * Check if real Visual Studio 2010 is installed (not our fake keys).
+     */
+    private isRealVS2010Installed(): boolean {
+        const paths = [
+            'C:\\Program Files (x86)\\Microsoft Visual Studio 10.0\\Common7\\IDE\\devenv.exe',
+            'C:\\Program Files\\Microsoft Visual Studio 10.0\\Common7\\IDE\\devenv.exe',
+        ];
+        return paths.some(p => fs.existsSync(p));
+    }
+
+    /**
+     * Check if our fake VS2010 registry marker already exists.
+     */
+    private hasFakeVSMarker(): boolean {
+        try {
+            execSync('reg query "HKLM\\SOFTWARE\\Wow6432Node\\Microsoft\\VisualStudio\\10.0" /v "NexiaIDEFakeVS"', { stdio: 'pipe' });
+            return true;
+        } catch {
+            try {
+                execSync('reg query "HKLM\\SOFTWARE\\Microsoft\\VisualStudio\\10.0" /v "NexiaIDEFakeVS"', { stdio: 'pipe' });
+                return true;
+            } catch {
+                return false;
+            }
+        }
+    }
+
+    /**
+     * Create fake VS2010 registry keys so the Xbox 360 SDK installer
+     * enables the "Full Installation" option.
+     *
+     * SAFETY:
+     *   - Only writes to HKLM\SOFTWARE\Microsoft\VisualStudio\10.0
+     *   - These are application-level keys, NOT system/boot/driver keys
+     *   - Windows does not use these keys for any OS functionality
+     *   - Will not overwrite a real VS2010 installation
+     *   - Creates a NexiaIDEFakeVS marker for safe cleanup
+     *
+     * Returns { success, message } indicating outcome.
+     */
+    prepSdkRegistry(): { success: boolean; message: string } {
+        // Safety: don't overwrite real VS2010
+        if (this.isRealVS2010Installed()) {
+            return {
+                success: false,
+                message: 'Visual Studio 2010 is already installed. You can run the SDK installer directly and select "Full Installation".',
+            };
+        }
+
+        // Safety: check if SDK is already fully installed
+        if (this.detectInstallState() === 'full') {
+            return {
+                success: false,
+                message: 'The Xbox 360 SDK is already fully installed with include/ and lib/ directories.',
+            };
+        }
+
+        try {
+            const cmds = [
+                // Marker so cleanup knows these are ours
+                'reg add "HKLM\\SOFTWARE\\Wow6432Node\\Microsoft\\VisualStudio\\10.0" /v "NexiaIDEFakeVS" /t REG_SZ /d "1" /f',
+                'reg add "HKLM\\SOFTWARE\\Microsoft\\VisualStudio\\10.0" /v "NexiaIDEFakeVS" /t REG_SZ /d "1" /f',
+
+                // Wow6432Node keys (64-bit Windows)
+                'reg add "HKLM\\SOFTWARE\\Wow6432Node\\Microsoft\\VisualStudio\\10.0" /v "InstallDir" /t REG_SZ /d "C:\\Program Files (x86)\\Microsoft Visual Studio 10.0\\Common7\\IDE\\" /f',
+                'reg add "HKLM\\SOFTWARE\\Wow6432Node\\Microsoft\\VisualStudio\\10.0\\Setup\\VS" /v "ProductDir" /t REG_SZ /d "C:\\Program Files (x86)\\Microsoft Visual Studio 10.0\\" /f',
+                'reg add "HKLM\\SOFTWARE\\Wow6432Node\\Microsoft\\VisualStudio\\10.0\\Setup\\VS" /v "EnvironmentDirectory" /t REG_SZ /d "C:\\Program Files (x86)\\Microsoft Visual Studio 10.0\\Common7\\IDE\\" /f',
+                'reg add "HKLM\\SOFTWARE\\Wow6432Node\\Microsoft\\VisualStudio\\10.0\\Setup\\VS" /v "EnvironmentPath" /t REG_SZ /d "C:\\Program Files (x86)\\Microsoft Visual Studio 10.0\\Common7\\IDE\\devenv.exe" /f',
+                'reg add "HKLM\\SOFTWARE\\Wow6432Node\\Microsoft\\VisualStudio\\10.0\\Setup\\VC" /v "ProductDir" /t REG_SZ /d "C:\\Program Files (x86)\\Microsoft Visual Studio 10.0\\VC\\" /f',
+
+                // Native keys (32-bit fallback)
+                'reg add "HKLM\\SOFTWARE\\Microsoft\\VisualStudio\\10.0" /v "InstallDir" /t REG_SZ /d "C:\\Program Files (x86)\\Microsoft Visual Studio 10.0\\Common7\\IDE\\" /f',
+                'reg add "HKLM\\SOFTWARE\\Microsoft\\VisualStudio\\10.0\\Setup\\VS" /v "ProductDir" /t REG_SZ /d "C:\\Program Files (x86)\\Microsoft Visual Studio 10.0\\" /f',
+                'reg add "HKLM\\SOFTWARE\\Microsoft\\VisualStudio\\10.0\\Setup\\VS" /v "EnvironmentDirectory" /t REG_SZ /d "C:\\Program Files (x86)\\Microsoft Visual Studio 10.0\\Common7\\IDE\\" /f',
+                'reg add "HKLM\\SOFTWARE\\Microsoft\\VisualStudio\\10.0\\Setup\\VS" /v "EnvironmentPath" /t REG_SZ /d "C:\\Program Files (x86)\\Microsoft Visual Studio 10.0\\Common7\\IDE\\devenv.exe" /f',
+                'reg add "HKLM\\SOFTWARE\\Microsoft\\VisualStudio\\10.0\\Setup\\VC" /v "ProductDir" /t REG_SZ /d "C:\\Program Files (x86)\\Microsoft Visual Studio 10.0\\VC\\" /f',
+            ];
+
+            for (const cmd of cmds) {
+                execSync(cmd, { stdio: 'pipe', windowsHide: true });
+            }
+
+            return {
+                success: true,
+                message: 'Registry keys created. You can now run the Xbox 360 SDK installer and select "Full Installation". After installing, click "Clean Up Registry Keys" to remove the fake entries.',
+            };
+        } catch (e: any) {
+            if (e.message && e.message.includes('Access is denied')) {
+                return {
+                    success: false,
+                    message: 'Access denied. Please run Nexia IDE as Administrator to modify registry keys.',
+                };
+            }
+            return {
+                success: false,
+                message: `Failed to create registry keys: ${e.message || e}`,
+            };
+        }
+    }
+
+    /**
+     * Remove the fake VS2010 registry keys created by prepSdkRegistry().
+     *
+     * SAFETY:
+     *   - Only removes keys if the NexiaIDEFakeVS marker is present
+     *   - Will not delete real VS2010 keys
+     *   - Removes individual values first, only deletes parent keys if empty
+     */
+    cleanupSdkRegistry(): { success: boolean; message: string } {
+        // Safety: check our marker exists
+        if (!this.hasFakeVSMarker()) {
+            return {
+                success: false,
+                message: 'No Nexia IDE registry keys found to clean up.',
+            };
+        }
+
+        // Safety: warn if real VS2010 appeared since prep
+        if (this.isRealVS2010Installed()) {
+            return {
+                success: false,
+                message: 'Visual Studio 2010 appears to have been installed. Removing registry keys could break it. Cleanup skipped.',
+            };
+        }
+
+        try {
+            const cmds = [
+                // Remove sub-keys first (deepest first)
+                'reg delete "HKLM\\SOFTWARE\\Wow6432Node\\Microsoft\\VisualStudio\\10.0\\Setup\\VC" /f',
+                'reg delete "HKLM\\SOFTWARE\\Wow6432Node\\Microsoft\\VisualStudio\\10.0\\Setup\\VS" /f',
+                'reg delete "HKLM\\SOFTWARE\\Microsoft\\VisualStudio\\10.0\\Setup\\VC" /f',
+                'reg delete "HKLM\\SOFTWARE\\Microsoft\\VisualStudio\\10.0\\Setup\\VS" /f',
+
+                // Remove our specific values from the 10.0 key
+                'reg delete "HKLM\\SOFTWARE\\Wow6432Node\\Microsoft\\VisualStudio\\10.0" /v "InstallDir" /f',
+                'reg delete "HKLM\\SOFTWARE\\Wow6432Node\\Microsoft\\VisualStudio\\10.0" /v "NexiaIDEFakeVS" /f',
+                'reg delete "HKLM\\SOFTWARE\\Microsoft\\VisualStudio\\10.0" /v "InstallDir" /f',
+                'reg delete "HKLM\\SOFTWARE\\Microsoft\\VisualStudio\\10.0" /v "NexiaIDEFakeVS" /f',
+            ];
+
+            for (const cmd of cmds) {
+                try {
+                    execSync(cmd, { stdio: 'pipe', windowsHide: true });
+                } catch {
+                    // Ignore errors for individual deletions (key may not exist)
+                }
+            }
+
+            // Try to clean up empty parent keys — ignore errors if they have other sub-keys
+            const parentCleanup = [
+                'reg delete "HKLM\\SOFTWARE\\Wow6432Node\\Microsoft\\VisualStudio\\10.0\\Setup" /f',
+                'reg delete "HKLM\\SOFTWARE\\Wow6432Node\\Microsoft\\VisualStudio\\10.0" /f',
+                'reg delete "HKLM\\SOFTWARE\\Microsoft\\VisualStudio\\10.0\\Setup" /f',
+                'reg delete "HKLM\\SOFTWARE\\Microsoft\\VisualStudio\\10.0" /f',
+            ];
+            for (const cmd of parentCleanup) {
+                try { execSync(cmd, { stdio: 'pipe', windowsHide: true }); } catch {}
+            }
+
+            return {
+                success: true,
+                message: 'Fake VS2010 registry keys removed. Your SDK installation is unaffected.',
+            };
+        } catch (e: any) {
+            if (e.message && e.message.includes('Access is denied')) {
+                return {
+                    success: false,
+                    message: 'Access denied. Please run Nexia IDE as Administrator to clean up registry keys.',
+                };
+            }
+            return {
+                success: false,
+                message: `Failed to clean up registry keys: ${e.message || e}`,
+            };
+        }
     }
 
     /**
