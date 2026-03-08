@@ -38,6 +38,19 @@ export interface ProjectConfig {
     defines: string[];
     configuration: 'Debug' | 'Release' | 'Profile';
     pchHeader?: string;  // Precompiled header name, e.g. "stdafx.h"
+
+    // ── Advanced Compiler/Linker Settings ──
+    enableRtti?: boolean;                    // /GR (true) or /GR- (false, default)
+    exceptionHandling?: 'sync' | 'async' | 'none';  // /EHsc, /EHa, or omitted
+    warningLevel?: 0 | 1 | 2 | 3 | 4;      // /W0 through /W4 (default: 3)
+    treatWarningsAsErrors?: boolean;         // /WX
+    optimizationOverride?: 'disabled' | 'minSize' | 'maxSpeed' | 'full' | 'default';  // /Od, /O1, /O2, /Ox — overrides config defaults
+    additionalCompilerFlags?: string;        // Extra flags appended to cl.exe
+    additionalLinkerFlags?: string;          // Extra flags appended to link.exe
+
+    // ── Extended VS2010-style Properties ──
+    // Stored as a flexible bag so new properties can be added without schema changes
+    properties?: Record<string, any>;
 }
 
 export interface ProjectTemplate {
@@ -100,6 +113,9 @@ export const IPC = {
     SDK_CONFIGURE: 'sdk:configure',
     SDK_GET_PATHS: 'sdk:getPaths',
     SDK_GET_TOOLS: 'sdk:getTools',
+    SDK_PREP_REGISTRY: 'sdk:prepRegistry',
+    SDK_CLEANUP_REGISTRY: 'sdk:cleanupRegistry',
+    SDK_INSTALL_STATE: 'sdk:installState',
 
     // Project
     PROJECT_NEW: 'project:new',
@@ -159,6 +175,7 @@ export const IPC = {
     DEVKIT_SCREENSHOT: 'devkit:screenshot',
     DEVKIT_FILE_MANAGER: 'devkit:fileManager',
     DEVKIT_STATUS: 'devkit:status',
+    DEVKIT_COPY_TO: 'devkit:copyTo',
 
     // Emulator
     EMU_LAUNCH: 'emu:launch',
@@ -203,6 +220,15 @@ export const IPC = {
     DISCORD_AUTH_START: 'discord:authStart',
     DISCORD_AUTH_USER: 'discord:authUser',
     DISCORD_AUTH_LOGOUT: 'discord:authLogout',
+    DISCORD_CHECK_GUILDS: 'discord:checkGuilds',
+
+    // Lessons
+    LESSON_IMPORT: 'lesson:import',
+    LESSON_EXPORT: 'lesson:export',
+    LESSON_LIST: 'lesson:list',
+    LESSON_READ: 'lesson:read',
+    LESSON_DELETE: 'lesson:delete',
+    LESSON_GET_DIR: 'lesson:getDir',
 } as const;
 
 // ── File Tree Types ──

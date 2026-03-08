@@ -199,6 +199,53 @@ export const TIPS_DATABASE: Tip[] = [
         body: 'Every .cpp file must have #include "stdafx.h" as its FIRST line (before any other code or includes). The compiler will error if anything appears before it.',
         category: 'build', minLevel: 'beginner', trigger: 'build-fail',
     },
+
+    // ── Merged from NewIDE (C rewrite) — unique tips not in original TS ──
+    {
+        id: 'tip-errors-nav', title: 'Navigating Errors', icon: '❌',
+        body: 'Double-click an error in the output panel to jump directly to the file and line. The Problems panel groups all errors and warnings.',
+        category: 'ide', minLevel: 'beginner', trigger: 'build-fail',
+    },
+    {
+        id: 'tip-quick-deploy', title: 'Quick Deploy', icon: '⬆',
+        body: 'After building, use Deploy to Console to send your XEX to a connected devkit. Make sure you are connected first via the Devkit panel.',
+        category: 'ide', minLevel: 'beginner', trigger: 'build-success',
+    },
+    {
+        id: 'tip-proj-props', title: 'Project Properties', icon: '⚙',
+        body: 'Open Build > Project Properties to configure compiler flags, linker settings, XEX options, and more. Right-click the project root for quick access.',
+        category: 'ide', minLevel: 'beginner', trigger: 'project-create',
+    },
+    {
+        id: 'tip-xam', title: 'XAM Functions', icon: '🎮',
+        body: 'XAM (Xbox Application Manager) provides system-level services: user sign-in, achievements, storage device selection, and the Xbox Guide overlay.',
+        category: 'xbox360', minLevel: 'intermediate', trigger: 'editor-idle',
+    },
+    {
+        id: 'tip-volatile', title: 'Volatile for Hardware', icon: '⚠',
+        body: 'When reading or writing hardware registers or shared memory between CPU cores, use the volatile keyword to prevent the compiler from reordering or caching the access.',
+        category: 'cpp', minLevel: 'expert', trigger: 'editor-idle',
+    },
+    {
+        id: 'tip-d3d-edram', title: '10MB eDRAM', icon: '🖥',
+        body: 'Xbox 360 has 10MB of embedded DRAM for the render target. At 1280x720x32bpp that is roughly 3.5MB, leaving room for the depth buffer and MSAA resolve.',
+        category: 'd3d', minLevel: 'intermediate', trigger: 'editor-idle',
+    },
+    {
+        id: 'tip-d3d-720p', title: '720p HD Output', icon: '📺',
+        body: 'Set PresentationInterval to D3DPRESENT_INTERVAL_ONE for 30fps vsync, or D3DPRESENT_INTERVAL_TWO for 60fps. Xbox 360 runs at 720p natively.',
+        category: 'd3d', minLevel: 'intermediate', trigger: 'editor-idle',
+    },
+    {
+        id: 'tip-pch-speed', title: 'Precompiled Header Speed', icon: '⚡',
+        body: 'Using precompiled headers (stdafx.h) can cut build times by 50-80% on large projects. Put stable SDK headers there but avoid frequently-changing project headers.',
+        category: 'build', minLevel: 'intermediate', trigger: 'build-success',
+    },
+    {
+        id: 'tip-warnings-errors', title: 'Treat Warnings as Errors', icon: '⚠',
+        body: 'Enable "Treat Warnings as Errors" in Project Properties to catch potential bugs early. Warning level 3 or 4 is recommended for Xbox 360 projects.',
+        category: 'build', minLevel: 'intermediate', trigger: 'editor-idle',
+    },
 ];
 
 // ── Achievements ──

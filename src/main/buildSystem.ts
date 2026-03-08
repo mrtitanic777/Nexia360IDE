@@ -10,6 +10,29 @@ import { spawn, ChildProcess } from 'child_process';
 import { Toolchain } from './toolchain';
 import { BuildConfig, BuildResult, BuildMessage, ProjectConfig } from '../shared/types';
 
+/**
+ * Generate a unique .obj filename from a source path by incorporating the
+ * relative directory structure.  This prevents collisions when two source
+ * files share the same basename (e.g. src/Main.cpp and src/net/Main.cpp).
+ *
+ *   src/Main.cpp        →  Main.obj
+ *   src/net/Main.cpp    →  net_Main.obj
+ *   src/a/b/Util.cpp    →  a_b_Util.obj
+ */
+function uniqueObjName(srcPath: string, projectRoot: string): string {
+    const srcDir = path.join(projectRoot, 'src');
+    // Get path relative to src/ (or project root if not under src/)
+    let rel: string;
+    if (srcPath.startsWith(srcDir + path.sep) || srcPath.startsWith(srcDir + '/')) {
+        rel = path.relative(srcDir, srcPath);
+    } else {
+        rel = path.relative(projectRoot, srcPath);
+    }
+    // Replace directory separators with underscores, swap extension to .obj
+    const noExt = rel.replace(/\.[^.]+$/, '');
+    return noExt.replace(/[\\/]/g, '_') + '.obj';
+}
+
 export class BuildSystem {
     private toolchain: Toolchain;
     private currentProcess: ChildProcess | null = null;
@@ -96,13 +119,23 @@ export class BuildSystem {
         // Discover all source files: merge config list with directory scan
         const configuredFiles = (project.sourceFiles || []).filter(f => /\.(cpp|c|cc|cxx)$/i.test(f));
         const discoveredFiles = this.discoverSourceFiles(project.path);
-        const allSources = new Set<string>();
+
+        // Deduplicate source files — use case-insensitive comparison on Windows
+        // because NTFS treats "main.cpp" and "Main.cpp" as the same file.
+        const seenPaths = new Set<string>();
+        const sourceFiles: string[] = [];
+        const addSource = (filePath: string) => {
+            const key = process.platform === 'win32' ? filePath.toLowerCase() : filePath;
+            if (!seenPaths.has(key)) {
+                seenPaths.add(key);
+                sourceFiles.push(filePath);
+            }
+        };
         for (const f of configuredFiles) {
             const abs = path.isAbsolute(f) ? f : path.join(project.path, f);
-            allSources.add(abs);
+            addSource(abs);
         }
-        for (const f of discoveredFiles) allSources.add(f);
-        const sourceFiles = Array.from(allSources);
+        for (const f of discoveredFiles) addSource(f);
         const objFiles: string[] = [];
 
         // Determine PCH files
@@ -113,35 +146,83 @@ export class BuildSystem {
         const nonPchFiles = sourceFiles.filter(f => path.basename(f).toLowerCase() !== pchCppName.toLowerCase());
         const usePch = !!pchCpp;
 
+        // ── Incremental build tracking ──
+        let pchRebuilt = false;
+        let compiledCount = 0;
+        let skippedCount = 0;
+
         if (sourceFiles.length > 0) {
             this.emit(`1>ClCompile:\n`);
 
+            // Check if a source file needs recompilation by comparing mtimes.
+            // A file needs recompilation if:
+            //   - Its .obj doesn't exist
+            //   - The source file is newer than its .obj
+            //   - The PCH is being rebuilt (any header change invalidates all)
+
+            const needsCompile = (srcPath: string, objPath: string): boolean => {
+                if (!fs.existsSync(objPath)) return true;
+                if (pchRebuilt) return true;  // PCH changed → everything recompiles
+                try {
+                    const srcMtime = fs.statSync(srcPath).mtimeMs;
+                    const objMtime = fs.statSync(objPath).mtimeMs;
+                    return srcMtime > objMtime;
+                } catch {
+                    return true;
+                }
+            };
+
             // Step 1: Compile PCH source first with /Yc (create precompiled header)
             if (usePch && pchCpp) {
-                // Clean stale PCH and compiler PDB to prevent C2859
-                try { fs.unlinkSync(pchPath); } catch {}
-                try { fs.unlinkSync(path.join(buildConfig.outputDir, 'vc100.pdb')); } catch {}
-
                 const baseName = path.basename(pchCpp);
-                const objName = path.basename(pchCpp, path.extname(pchCpp)) + '.obj';
+                const objName = uniqueObjName(pchCpp, project.path);
                 const objPath = path.join(buildConfig.outputDir, objName);
 
-                this.emit(`1>  ${baseName}\n`);
+                // Check if PCH needs rebuilding: pch source or pch header changed
+                let pchNeedsRebuild = !fs.existsSync(pchPath) || !fs.existsSync(objPath);
+                if (!pchNeedsRebuild) {
+                    try {
+                        const pchObjMtime = fs.statSync(objPath).mtimeMs;
+                        const srcMtime = fs.statSync(pchCpp).mtimeMs;
+                        if (srcMtime > pchObjMtime) pchNeedsRebuild = true;
 
-                const result = await this.compile(pchCpp, objPath, project, buildConfig, {
-                    pchMode: 'create', pchHeader: pchHeaderName, pchFile: pchPath
-                });
-                fullOutput += result.output;
-
-                if (result.rawLines.length > 0) {
-                    for (const line of result.rawLines) this.emit(`1>  ${line}\n`);
+                        // Also check the PCH header file itself
+                        const pchHeaderPath = path.join(project.path, 'src', pchHeaderName);
+                        if (fs.existsSync(pchHeaderPath)) {
+                            const hdrMtime = fs.statSync(pchHeaderPath).mtimeMs;
+                            if (hdrMtime > pchObjMtime) pchNeedsRebuild = true;
+                        }
+                    } catch {
+                        pchNeedsRebuild = true;
+                    }
                 }
 
-                if (result.errors.length > 0) {
-                    errors.push(...result.errors);
+                if (pchNeedsRebuild) {
+                    // Clean stale PCH and compiler PDB to prevent C2859
+                    try { fs.unlinkSync(pchPath); } catch {}
+                    try { fs.unlinkSync(path.join(buildConfig.outputDir, 'vc100.pdb')); } catch {}
+
+                    this.emit(`1>  ${baseName}\n`);
+
+                    const result = await this.compile(pchCpp, objPath, project, buildConfig, {
+                        pchMode: 'create', pchHeader: pchHeaderName, pchFile: pchPath
+                    });
+                    fullOutput += result.output;
+
+                    if (result.rawLines.length > 0) {
+                        for (const line of result.rawLines) this.emit(`1>  ${line}\n`);
+                    }
+
+                    if (result.errors.length > 0) {
+                        errors.push(...result.errors);
+                    } else {
+                        objFiles.push(objPath);
+                        warnings.push(...result.warnings);
+                        pchRebuilt = true;
+                    }
                 } else {
+                    // PCH is up to date — still need the .obj for linking
                     objFiles.push(objPath);
-                    warnings.push(...result.warnings);
                 }
             }
 
@@ -153,13 +234,23 @@ export class BuildSystem {
             }
 
             // Step 2: Compile remaining source files with /Yu (use precompiled header)
-            if (nonPchFiles.length > 0 && usePch) {
-                this.emit(`1>  Compiling...\n`);
-            }
+
             for (const srcPath of nonPchFiles) {
                 const baseName = path.basename(srcPath);
-                const objName = path.basename(srcPath, path.extname(srcPath)) + '.obj';
+                const objName = uniqueObjName(srcPath, project.path);
                 const objPath = path.join(buildConfig.outputDir, objName);
+
+                if (!needsCompile(srcPath, objPath)) {
+                    // Up to date — skip compilation but include obj for linking
+                    objFiles.push(objPath);
+                    skippedCount++;
+                    continue;
+                }
+
+                if (compiledCount === 0 && usePch) {
+                    this.emit(`1>  Compiling...\n`);
+                }
+                compiledCount++;
 
                 this.emit(`1>  ${baseName}\n`);
 
@@ -179,6 +270,12 @@ export class BuildSystem {
                 }
             }
 
+            if (skippedCount > 0 && compiledCount > 0) {
+                this.emit(`1>  ${skippedCount} file${skippedCount > 1 ? 's' : ''} up to date, ${compiledCount} recompiled.\n`);
+            } else if (compiledCount === 0 && skippedCount > 0 && !pchRebuilt) {
+                this.emit(`1>  All files are up to date.\n`);
+            }
+
             this.emit(`1>  Generating Code...\n`);
         }
 
@@ -189,54 +286,94 @@ export class BuildSystem {
             return { success: false, errors, warnings, output: fullOutput, duration };
         }
 
-        // ── Link ──
+        // ── Link / Archive ──
         if (objFiles.length > 0) {
-            this.emit(`1>Link:\n`);
-            const exeName = project.name + (project.type === 'dll' ? '.dll' : '.exe');
-            const exePath = path.join(buildConfig.outputDir, exeName);
+            if (project.type === 'library') {
+                // ── Static Library: use lib.exe to create .lib archive ──
+                const libName = project.name + '.lib';
+                const libPath = path.join(buildConfig.outputDir, libName);
+                const needsLib = compiledCount > 0 || pchRebuilt || !fs.existsSync(libPath);
 
-            this.emit(`1>  ${exeName}\n`);
+                if (needsLib) {
+                    this.emit(`1>Lib:\n`);
+                    this.emit(`1>  ${libName}\n`);
 
-            const linkResult = await this.link(objFiles, exePath, project, buildConfig);
-            fullOutput += linkResult.output;
-            errors.push(...linkResult.errors);
-            warnings.push(...linkResult.warnings);
+                    const libResult = await this.archive(objFiles, libPath, project);
+                    fullOutput += libResult.output;
+                    errors.push(...libResult.errors);
+                    warnings.push(...libResult.warnings);
 
-            if (linkResult.rawLines.length > 0) {
-                for (const line of linkResult.rawLines) {
-                    this.emit(`1>  ${line}\n`);
-                }
-            }
-
-            if (linkResult.errors.length > 0) {
-                const duration = Date.now() - startTime;
-                this.emitFailure(project, errors, warnings, duration, unsuccessfulMarker);
-                return { success: false, errors, warnings, output: fullOutput, duration };
-            }
-
-            // ── ImageXex ──
-            if (project.type === 'executable') {
-                this.emit(`1>ImageXex:\n`);
-                const xexPath = path.join(buildConfig.outputDir, project.name + '.xex');
-
-                this.emit(`1>  Microsoft(R) Xbox 360 Image File Builder Version 2.0.21256.0\n`);
-                this.emit(`1>  (c)2012 Microsoft Corporation. All rights reserved.\n`);
-                this.emit(`1>  \n`);
-
-                const xexResult = await this.buildXex(exePath, xexPath);
-                fullOutput += xexResult.output;
-
-                if (xexResult.rawLines.length > 0) {
-                    for (const line of xexResult.rawLines) {
-                        this.emit(`1>  ${line}\n`);
+                    if (libResult.rawLines.length > 0) {
+                        for (const line of libResult.rawLines) {
+                            this.emit(`1>  ${line}\n`);
+                        }
                     }
-                }
 
-                if (xexResult.errors.length > 0) {
-                    errors.push(...xexResult.errors);
-                    const duration = Date.now() - startTime;
-                    this.emitFailure(project, errors, warnings, duration, unsuccessfulMarker);
-                    return { success: false, errors, warnings, output: fullOutput, duration };
+                    if (libResult.errors.length > 0) {
+                        const duration = Date.now() - startTime;
+                        this.emitFailure(project, errors, warnings, duration, unsuccessfulMarker);
+                        return { success: false, errors, warnings, output: fullOutput, duration };
+                    }
+                } else {
+                    this.emit(`1>  ${libName} is up to date.\n`);
+                }
+            } else {
+                // ── Executable or DLL: use link.exe ──
+                const outputExt = project.type === 'dll' ? '.dll' : '.exe';
+                const exeName = project.name + outputExt;
+                const exePath = path.join(buildConfig.outputDir, exeName);
+
+                // Skip link if nothing was recompiled and the output already exists
+                const needsLink = compiledCount > 0 || pchRebuilt || !fs.existsSync(exePath);
+
+                if (needsLink) {
+                    this.emit(`1>Link:\n`);
+                    this.emit(`1>  ${exeName}\n`);
+
+                    const linkResult = await this.link(objFiles, exePath, project, buildConfig);
+                    fullOutput += linkResult.output;
+                    errors.push(...linkResult.errors);
+                    warnings.push(...linkResult.warnings);
+
+                    if (linkResult.rawLines.length > 0) {
+                        for (const line of linkResult.rawLines) {
+                            this.emit(`1>  ${line}\n`);
+                        }
+                    }
+
+                    if (linkResult.errors.length > 0) {
+                        const duration = Date.now() - startTime;
+                        this.emitFailure(project, errors, warnings, duration, unsuccessfulMarker);
+                        return { success: false, errors, warnings, output: fullOutput, duration };
+                    }
+
+                    // ── ImageXex (executables and DLLs both get XEX-wrapped on Xbox 360) ──
+                    if (project.type === 'executable' || project.type === 'dll') {
+                        this.emit(`1>ImageXex:\n`);
+                        const xexPath = path.join(buildConfig.outputDir, project.name + '.xex');
+
+                        this.emit(`1>  Microsoft(R) Xbox 360 Image File Builder Version 2.0.21256.0\n`);
+                        this.emit(`1>  (c)2012 Microsoft Corporation. All rights reserved.\n`);
+                        this.emit(`1>  \n`);
+
+                        const xexResult = await this.buildXex(exePath, xexPath, project);
+                        fullOutput += xexResult.output;
+
+                        if (xexResult.rawLines.length > 0) {
+                            for (const line of xexResult.rawLines) {
+                                this.emit(`1>  ${line}\n`);
+                            }
+                        }
+
+                        if (xexResult.errors.length > 0) {
+                            errors.push(...xexResult.errors);
+                            const duration = Date.now() - startTime;
+                            this.emitFailure(project, errors, warnings, duration, unsuccessfulMarker);
+                            return { success: false, errors, warnings, output: fullOutput, duration };
+                        }
+                    }
+                } else {
+                    this.emit(`1>  ${exeName} is up to date.\n`);
                 }
             }
         }
@@ -261,7 +398,8 @@ export class BuildSystem {
             this.emitFailure(project, errors, warnings, duration, unsuccessfulMarker);
         }
 
-        const outputFile = path.join(buildConfig.outputDir, project.name + '.xex');
+        const outputExt = project.type === 'library' ? '.lib' : '.xex';
+        const outputFile = path.join(buildConfig.outputDir, project.name + outputExt);
         return { success, errors, warnings, output: fullOutput, duration, outputFile: success ? outputFile : undefined };
     }
 
@@ -316,10 +454,35 @@ export class BuildSystem {
             args.push(`/Fp"${pchOpts.pchFile}"`);
         }
 
-        // Include paths
-        args.push(`/I"${sdkPaths.include}"`);
+        // Include paths — Xbox-specific headers MUST come first to avoid
+        // picking up internal CRT headers from Source\crt\
         const xboxInc = path.join(sdkPaths.include, 'xbox');
         if (fs.existsSync(xboxInc)) args.push(`/I"${xboxInc}"`);
+        args.push(`/I"${sdkPaths.include}"`);
+
+        // MSVC CRT headers (excpt.h, stdarg.h, etc.) — needed by xtl.h
+        // Check multiple possible locations for the Visual C++ headers
+        const vcIncludeCandidates = [
+            path.join(sdkPaths.root, 'vc', 'include'),
+            path.join(sdkPaths.root, 'include', 'msvc'),
+            path.join(sdkPaths.root, 'msvc', 'include'),
+            // TechPreview compiler headers — contains public excpt.h, crtdefs.h,
+            // vadefs.h without the internal CRT #error guard that Source\crt has.
+            // This is the primary fallback for machines without VS installed.
+            path.join(sdkPaths.root, 'TechPreview', 'Jul12Compiler', 'include', 'xbox'),
+            // Standard MSVC 2010 install
+            'C:\\Program Files (x86)\\Microsoft Visual Studio 10.0\\VC\\include',
+            'C:\\Program Files\\Microsoft Visual Studio 10.0\\VC\\include',
+            // MSVC 2008
+            'C:\\Program Files (x86)\\Microsoft Visual Studio 9.0\\VC\\include',
+            'C:\\Program Files\\Microsoft Visual Studio 9.0\\VC\\include',
+        ];
+        for (const vcInc of vcIncludeCandidates) {
+            if (fs.existsSync(vcInc) && fs.existsSync(path.join(vcInc, 'excpt.h'))) {
+                args.push(`/I"${vcInc}"`);
+                break;
+            }
+        }
         // Project source dir
         args.push(`/I"${path.join(project.path, 'src')}"`);
         args.push(`/I"${project.path}"`);
@@ -343,10 +506,48 @@ export class BuildSystem {
         // User defines
         for (const def of config.defines) args.push(`/D${def}`);
 
-        // Standard flags
-        args.push('/EHsc', '/W3');
+        // Standard flags — driven by Project Properties
+        // Exception handling
+        const eh = project.exceptionHandling ?? 'sync';
+        if (eh === 'sync') args.push('/EHsc');
+        else if (eh === 'async') args.push('/EHa');
+        // 'none' = omit /EH entirely
 
-        // Additional compiler flags
+        // Warning level
+        const wl = project.warningLevel ?? 3;
+        args.push(`/W${wl}`);
+
+        // Treat warnings as errors
+        if (project.treatWarningsAsErrors) args.push('/WX');
+
+        // RTTI
+        if (project.enableRtti) args.push('/GR');
+        else args.push('/GR-');
+
+        // Optimization override (if set, overrides configuration defaults)
+        if (project.optimizationOverride && project.optimizationOverride !== 'default') {
+            // Remove any existing /O flags that were added by configuration block above
+            const oIdx = args.findIndex(a => a.startsWith('/O') || a === '/Od');
+            if (oIdx !== -1) args.splice(oIdx, 1);
+            // Also remove /Ox if present
+            const oxIdx = args.findIndex(a => a === '/Ox');
+            if (oxIdx !== -1) args.splice(oxIdx, 1);
+
+            switch (project.optimizationOverride) {
+                case 'disabled': args.push('/Od'); break;
+                case 'minSize': args.push('/O1'); break;
+                case 'maxSpeed': args.push('/O2'); break;
+                case 'full': args.push('/Ox'); break;
+            }
+        }
+
+        // Additional compiler flags from Project Properties
+        if (project.additionalCompilerFlags) {
+            const extra = project.additionalCompilerFlags.trim().split(/\s+/).filter(f => f);
+            args.push(...extra);
+        }
+
+        // Additional compiler flags from BuildConfig (runtime overrides)
         args.push(...config.compilerFlags);
 
         // Source file
@@ -388,21 +589,30 @@ export class BuildSystem {
             args.push(`/LIBPATH:"${libPath}"`);
         }
 
-        // Default Xbox 360 libraries — matches VS2010 project defaults exactly
+        // Default Xbox 360 libraries — matches VS2010 Xbox 360 project defaults
         const isDebug = config.configuration === 'Debug';
         const defaultLibs = [
+            // Core runtime
             isDebug ? 'xapilibd.lib' : 'xapilib.lib',
+            'xboxkrnl.lib',
+            // Direct3D
             isDebug ? 'd3d9d.lib'    : 'd3d9.lib',
             isDebug ? 'd3dx9d.lib'   : 'd3dx9.lib',
             isDebug ? 'xgraphicsd.lib' : 'xgraphics.lib',
-            'xboxkrnl.lib',
-            isDebug ? 'xnetd.lib'    : 'xnet.lib',
+            // Audio
             isDebug ? 'xaudiod2.lib' : 'xaudio2.lib',
             isDebug ? 'xactd3.lib'   : 'xact3.lib',
             isDebug ? 'x3daudiod.lib': 'x3daudio.lib',
+            // Math / utility
             isDebug ? 'xmcored.lib'  : 'xmcore.lib',
+            // Networking
+            isDebug ? 'xnetd.lib'    : 'xnet.lib',
+            // Input
+            isDebug ? 'xinput2d.lib' : 'xinput2.lib',
+            // Parallelism
+            isDebug ? 'vcompd.lib'   : 'vcomp.lib',
         ];
-        if (isDebug) defaultLibs.push('xbdm.lib', 'vcompd.lib');
+        if (isDebug) defaultLibs.push('xbdm.lib');
         args.push(...defaultLibs);
 
         // SDK headers auto-link xapilib.lib via #pragma comment(lib).
@@ -420,7 +630,13 @@ export class BuildSystem {
             args.push(`/PDB:"${pdbPath}"`);
         }
 
-        // Additional linker flags
+        // Additional linker flags from Project Properties
+        if (project.additionalLinkerFlags) {
+            const extra = project.additionalLinkerFlags.trim().split(/\s+/).filter(f => f);
+            args.push(...extra);
+        }
+
+        // Additional linker flags from BuildConfig (runtime overrides)
         args.push(...config.linkerFlags);
 
         // Object files
@@ -429,7 +645,45 @@ export class BuildSystem {
         // Xbox 360 link.exe: skip XEX generation (done separately by buildXex)
         args.push('/XEX:NO');
 
-        return this.runTool(linkPath, args, '');
+        // Use a response file to avoid "The command line is too long" errors.
+        // Large projects (100+ .obj files) easily exceed the Windows command
+        // line limit of ~8191 chars (cmd.exe) or 32768 chars (CreateProcess).
+        // link.exe natively supports @responsefile syntax, just like MSBuild uses.
+        const rspPath = path.join(config.outputDir, 'link.rsp');
+        fs.writeFileSync(rspPath, args.join('\n'), 'utf-8');
+
+        return this.runTool(linkPath, [`@"${rspPath}"`], '');
+    }
+
+    /**
+     * Create a static library (.lib) from object files using lib.exe.
+     */
+    private async archive(
+        objFiles: string[],
+        outputPath: string,
+        project: ProjectConfig
+    ): Promise<{ output: string; errors: BuildMessage[]; warnings: BuildMessage[]; rawLines: string[] }> {
+        const libExe = this.toolchain.getToolPath('lib.exe');
+        if (!libExe) {
+            return { output: '', errors: [{ file: '', line: 0, column: 0, message: 'lib.exe not found in SDK', severity: 'error' }], warnings: [], rawLines: ['error: lib.exe not found in SDK'] };
+        }
+
+        const args: string[] = ['/nologo', `/OUT:"${outputPath}"`];
+
+        // Additional linker/lib flags from Project Properties
+        if (project.additionalLinkerFlags) {
+            const extra = project.additionalLinkerFlags.trim().split(/\s+/).filter(f => f);
+            args.push(...extra);
+        }
+
+        // Object files
+        for (const obj of objFiles) args.push(`"${obj}"`);
+
+        // Use a response file for large projects
+        const rspPath = path.join(path.dirname(outputPath), 'lib.rsp');
+        fs.writeFileSync(rspPath, args.join('\n'), 'utf-8');
+
+        return this.runTool(libExe, [`@"${rspPath}"`], '');
     }
 
     /**
@@ -437,14 +691,92 @@ export class BuildSystem {
      */
     private async buildXex(
         exePath: string,
-        xexPath: string
+        xexPath: string,
+        project: ProjectConfig
     ): Promise<{ output: string; errors: BuildMessage[]; warnings: BuildMessage[]; rawLines: string[] }> {
         const imagexex = this.toolchain.getToolPath('imagexex.exe');
         if (!imagexex) {
             return { output: '', errors: [{ file: '', line: 0, column: 0, message: 'imagexex.exe not found', severity: 'error' }], warnings: [], rawLines: ['error: imagexex.exe not found'] };
         }
 
-        const args = ['/nologo', `/out:"${xexPath}"`, `"${exePath}"`];
+        const props = project.properties || {};
+        const args: string[] = ['/nologo'];
+
+        // Output path
+        args.push(`/out:"${xexPath}"`);
+
+        // Configuration file (xex.xml) — if specified, overrides individual settings
+        if (props.xexConfigFile) {
+            const cfgPath = path.isAbsolute(props.xexConfigFile)
+                ? props.xexConfigFile
+                : path.join(project.path, props.xexConfigFile);
+            if (fs.existsSync(cfgPath)) {
+                args.push(`/config:"${cfgPath}"`);
+            }
+        }
+
+        // Title ID
+        if (props.xexTitleId) {
+            args.push(`/titleid:${props.xexTitleId}`);
+        }
+
+        // LAN Key
+        if (props.xexLanKey) {
+            args.push(`/lankey:${props.xexLanKey}`);
+        }
+
+        // Base Address
+        if (props.xexBaseAddress) {
+            args.push(`/baseaddr:${props.xexBaseAddress}`);
+        }
+
+        // Heap Size
+        if (props.xexHeapSize) {
+            args.push(`/heapsize:${props.xexHeapSize}`);
+        }
+
+        // Workspace Size
+        if (props.xexWorkspaceSize) {
+            args.push(`/workspace:${props.xexWorkspaceSize}`);
+        }
+
+        // Export By Name
+        if (props.xexExportByName) {
+            args.push('/exportbyname');
+        }
+
+        // Additional Sections
+        if (props.xexAdditionalSections) {
+            for (const sec of props.xexAdditionalSections.split(';').filter((s: string) => s.trim())) {
+                args.push(`/addsection:${sec.trim()}`);
+            }
+        }
+
+        // Privileges flags
+        if (props.xexDvdMapping) args.push('/opticaldiscdriveemulation');
+        if (props.xexPal50) args.push('/pal50incompatible');
+        if (props.xexMultiDisc) args.push('/multidisctitle');
+        if (props.xexBigButton) args.push('/preferbigbuttoninput');
+        if (props.xexCrossPlatform) args.push('/crossplatformsystemlink');
+        if (props.xexAvatarXuid) args.push('/allowavatargetmetadatabyxuid');
+        if (props.xexControllerSwap) args.push('/allowcontrollerswapping');
+        if (props.xexFullExperience) args.push('/requirefullexperience');
+        if (props.xexGameVoice) args.push('/gamevoicerequiredui');
+        if (props.xexNetworkAccess) args.push('/allownetworkaccess');
+        if (props.xexKinectElevation) args.push('/kinectelevationcontrol');
+        if (props.xexSkeletal && props.xexSkeletal !== 'none') {
+            args.push(`/skeletaltracking:${props.xexSkeletal}`);
+        }
+
+        // Additional XEX flags
+        if (props.xexAdditionalOptions) {
+            const extra = props.xexAdditionalOptions.trim().split(/\s+/).filter((f: string) => f);
+            args.push(...extra);
+        }
+
+        // Input executable
+        args.push(`"${exePath}"`);
+
         return this.runTool(imagexex, args, '');
     }
 
@@ -452,11 +784,37 @@ export class BuildSystem {
      * Clean build artifacts.
      */
     async clean(project: ProjectConfig): Promise<void> {
-        const outDir = path.join(project.path, 'out');
-        if (fs.existsSync(outDir)) {
-            fs.rmSync(outDir, { recursive: true, force: true });
-            this.emit(`1>  Cleaned: ${outDir}\n`);
+        // Only delete build artifacts — NOT the entire out/ directory.
+        // Users keep non-build files (Content folders, assets, configs, etc.)
+        // in the output directories that must be preserved.
+        const BUILD_ARTIFACT_EXTS = new Set([
+            '.obj', '.pch', '.pdb', '.exe', '.dll', '.xex', '.exp', '.lib',
+            '.ilk', '.rsp', '.lastbuildstate', '.unsuccessfulbuild',
+            '.idb', '.res', '.manifest',
+        ]);
+
+        const configs = ['Debug', 'Release', 'Profile'];
+        let cleanedCount = 0;
+
+        for (const cfg of configs) {
+            const cfgDir = path.join(project.path, 'out', cfg);
+            if (!fs.existsSync(cfgDir)) continue;
+
+            for (const entry of fs.readdirSync(cfgDir, { withFileTypes: true })) {
+                // Only delete files, never directories (Content/, etc.)
+                if (!entry.isDirectory()) {
+                    const ext = path.extname(entry.name).toLowerCase();
+                    if (BUILD_ARTIFACT_EXTS.has(ext)) {
+                        try {
+                            fs.unlinkSync(path.join(cfgDir, entry.name));
+                            cleanedCount++;
+                        } catch {}
+                    }
+                }
+            }
         }
+
+        this.emit(`1>  Cleaned ${cleanedCount} build artifact${cleanedCount !== 1 ? 's' : ''}.\n`);
         this.emit(`========== Clean: 1 succeeded ==========\n`);
     }
 

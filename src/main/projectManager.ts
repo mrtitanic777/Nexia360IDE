@@ -581,6 +581,142 @@ export class ProjectManager {
                     libraries: ['xnet.lib', 'xonline.lib'],
                 },
             },
+            {
+                id: 'dll',
+                name: 'Dynamic Library (.xex)',
+                description: 'Xbox 360 dynamic link library with exported functions.',
+                icon: '🔗',
+                files: [
+                    { path: 'src/stdafx.h', content: STDAFX_H },
+                    { path: 'src/stdafx.cpp', content: STDAFX_CPP },
+                    { path: 'src/dllmain.cpp', content:
+`#include "stdafx.h"
+
+// ── DLL Export Macros ──
+#ifdef BUILDING_DLL
+#define DLL_EXPORT __declspec(dllexport)
+#else
+#define DLL_EXPORT __declspec(dllimport)
+#endif
+
+// ── XNotifyQueueUI (ordinal 656 from xam.xex — not in any public header) ──
+typedef VOID (WINAPI *XNotifyQueueUI_t)(DWORD dwType, DWORD dwUserIndex,
+                                        DWORD dwPriority, LPCWSTR pwszText,
+                                        ULONGLONG qwParam);
+static XNotifyQueueUI_t g_XNotifyQueueUI = NULL;
+
+static void InitXNotify()
+{
+    if (g_XNotifyQueueUI != NULL) return;
+    HMODULE hXam = GetModuleHandle("xam.xex");
+    if (hXam)
+        g_XNotifyQueueUI = (XNotifyQueueUI_t)GetProcAddress(hXam, (LPCSTR)656);
+}
+
+static void ShowNotification(const WCHAR* text)
+{
+    if (g_XNotifyQueueUI)
+        g_XNotifyQueueUI(0, 0, 2, text, 0);
+}
+
+// ── DLL Entry Point ──
+BOOL APIENTRY DllMain(HANDLE hModule, DWORD dwReason, LPVOID lpReserved)
+{
+    switch (dwReason) {
+    case DLL_PROCESS_ATTACH:
+        InitXNotify();
+        ShowNotification(L"Hello Xbox! This is from NexiaIDE!");
+        break;
+    case DLL_PROCESS_DETACH:
+        break;
+    }
+    return TRUE;
+}
+
+// ── Exported Functions ──
+extern "C" {
+
+DLL_EXPORT int MyLibraryInit(void)
+{
+    InitXNotify();
+    ShowNotification(L"NexiaIDE DLL initialized!");
+    return 0; // S_OK
+}
+
+DLL_EXPORT void MyLibraryShutdown(void)
+{
+    // Clean up resources
+}
+
+} // extern "C"
+` },
+                ],
+                config: {
+                    type: 'dll' as any, template: 'empty',
+                    sourceFiles: ['src/stdafx.cpp', 'src/dllmain.cpp'],
+                    defines: ['_XBOX', 'BUILDING_DLL'],
+                    libraries: ['xam.lib'],
+                },
+            },
+            {
+                id: 'static-lib',
+                name: 'Static Library (.lib)',
+                description: 'Xbox 360 static library for reusable code modules.',
+                icon: '📦',
+                files: [
+                    { path: 'src/stdafx.h', content: STDAFX_H },
+                    { path: 'src/stdafx.cpp', content: STDAFX_CPP },
+                    { path: 'include/mylib.h', content:
+`#pragma once
+// ── MyLib Public Header ──
+// Include this header in projects that use this library.
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+int  MyLib_Init(void);
+void MyLib_Shutdown(void);
+int  MyLib_DoWork(const char* input, char* output, int outputSize);
+
+#ifdef __cplusplus
+}
+#endif
+` },
+                    { path: 'src/mylib.cpp', content:
+`#include "stdafx.h"
+#include "../include/mylib.h"
+#include <string.h>
+
+int MyLib_Init(void)
+{
+    // Initialize library state
+    return 0;
+}
+
+void MyLib_Shutdown(void)
+{
+    // Clean up library state
+}
+
+int MyLib_DoWork(const char* input, char* output, int outputSize)
+{
+    if (!input || !output || outputSize <= 0) return -1;
+
+    // Example: copy input to output (replace with real logic)
+    strncpy(output, input, outputSize - 1);
+    output[outputSize - 1] = '\\0';
+    return 0;
+}
+` },
+                ],
+                config: {
+                    type: 'library' as any, template: 'empty',
+                    sourceFiles: ['src/stdafx.cpp', 'src/mylib.cpp'],
+                    defines: ['_XBOX'],
+                    includeDirectories: ['include'],
+                },
+            },
         ];
     }
 

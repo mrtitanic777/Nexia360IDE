@@ -8,9 +8,15 @@ const nodePath = require('path');
 const nodeOs = require('os');
 const nodeFs = require('fs');
 
+// Shared app context — used by extracted modules (ai/, editor/, etc.)
+const appContext = require('./appContext');
+const { ctx: appCtx, fn: appFn } = appContext;
+
 const IPC = {
     SDK_DETECT: 'sdk:detect', SDK_CONFIGURE: 'sdk:configure',
     SDK_GET_PATHS: 'sdk:getPaths', SDK_GET_TOOLS: 'sdk:getTools',
+    SDK_PREP_REGISTRY: 'sdk:prepRegistry', SDK_CLEANUP_REGISTRY: 'sdk:cleanupRegistry',
+    SDK_INSTALL_STATE: 'sdk:installState',
     PROJECT_NEW: 'project:new', PROJECT_OPEN: 'project:open',
     PROJECT_SAVE: 'project:save', PROJECT_GET_CONFIG: 'project:getConfig',
     PROJECT_GET_TEMPLATES: 'project:getTemplates',
@@ -32,6 +38,7 @@ const IPC = {
     DEVKIT_VOLUMES: 'devkit:volumes',
     DEVKIT_DEPLOY: 'devkit:deploy', DEVKIT_LAUNCH: 'devkit:launch', DEVKIT_REBOOT: 'devkit:reboot',
     DEVKIT_SCREENSHOT: 'devkit:screenshot', DEVKIT_FILE_MANAGER: 'devkit:fileManager',
+    DEVKIT_COPY_TO: 'devkit:copyTo',
     EMU_LAUNCH: 'emu:launch', EMU_STOP: 'emu:stop', EMU_PAUSE: 'emu:pause',
     EMU_RESUME: 'emu:resume', EMU_STEP: 'emu:step', EMU_STEP_OVER: 'emu:stepOver',
     EMU_STATE: 'emu:state',
@@ -50,7 +57,11 @@ const IPC = {
     DISCORD_CREATE_THREAD: 'discord:createThread', DISCORD_REPLY: 'discord:reply',
     DISCORD_DOWNLOAD: 'discord:download', DISCORD_AUTH_START: 'discord:authStart',
     DISCORD_AUTH_USER: 'discord:authUser', DISCORD_AUTH_LOGOUT: 'discord:authLogout',
+    DISCORD_CHECK_GUILDS: 'discord:checkGuilds',
     XEX_INSPECT: 'xex:inspect',
+    LESSON_IMPORT: 'lesson:import', LESSON_EXPORT: 'lesson:export',
+    LESSON_LIST: 'lesson:list', LESSON_READ: 'lesson:read',
+    LESSON_DELETE: 'lesson:delete', LESSON_GET_DIR: 'lesson:getDir',
 };
 
 // ── State ──
@@ -62,13 +73,29 @@ let openTabs: { path: string; name: string; model: any; modified: boolean }[] = 
 let activeTab: string | null = null;
 let currentProject: any = null;
 let lastBuiltXex: string | null = null;
+let cinematicContainer: HTMLElement | null = null;
 let defaultProjectsDir: string = '';
-let bottomPanelVisible = true;
+let bottomPanelVisible = false;
 let sidebarVisible = true;
 
+// ── File Watcher ──
+// Tracks external modifications to open files (like VS "file changed outside editor" prompt)
+const fileWatchers = new Map<string, { watcher: any; mtime: number; ignoreNext: boolean }>();
+
 // ── Learning System ──
-const learning = require('./learning');
-const quizzes = require('./quizzes');
+const learning = require('./learning/learning');
+const quizzes = require('./learning/quizzes');
+const { learningProfile, MasteryLevel, MASTERY_LABELS } = require('./learning/learningProfile');
+const cinematicEngine = require('./learning/cinematicEngine');
+const { codeVisualizer } = require('./visualizer/codeVisualizer');
+
+// ── Icons (cached before Monaco overwrites window.require) ──
+const icons = require('./icons');
+
+// ── Auth & Admin ──
+const authService = require('./auth/authService');
+const authUI = require('./auth/authUI');
+const adminPanel = require('./admin/adminPanel');
 interface UserProfile {
     skillLevel: 'beginner' | 'intermediate' | 'expert';
     onboardingComplete: boolean;
@@ -104,14 +131,7 @@ let currentInlineTip: any = null;
 let tipCooldown = false;
 
 // ── Study System State ──
-let quizQuestions: any[] = [];
-let quizIndex = 0;
-let quizAnswered = false;
-let quizScore = { correct: 0, total: 0 };
-let quizMode: 'multiple-choice' | 'fill-in' = 'multiple-choice';
-let flashcards: { front: string; back: string }[] = [];
-let fcIndex = 0;
-let studyNotes: string = '';
+// Study state moved to panels/studyPanel.ts
 let currentCodeHint: any = null;
 let codeHelperDismissed: Set<string> = new Set();
 let lastHintLine = -1;
@@ -128,6 +148,9 @@ interface UserSettings {
     textColor: string;
     textDim: string;
     fancyEffects: boolean;
+    layout: string;
+    cornerRadius: string;
+    compactMode: boolean;
     // AI settings
     aiProvider: 'anthropic' | 'openai' | 'local' | 'custom';
     aiApiKey: string;
@@ -137,6 +160,8 @@ interface UserSettings {
     aiAutoErrors: boolean;
     aiInlineSuggest: boolean;
     aiFileContext: boolean;
+    // Color mode
+    colorMode: string;
 }
 const DEFAULT_SETTINGS: UserSettings = {
     fontSize: 14,
@@ -149,6 +174,9 @@ const DEFAULT_SETTINGS: UserSettings = {
     textColor: '#cccccc',
     textDim: '#858585',
     fancyEffects: true,
+    layout: 'sidebar-left',
+    cornerRadius: 'rounded',
+    compactMode: false,
     aiProvider: 'anthropic',
     aiApiKey: '',
     aiEndpoint: '',
@@ -157,6 +185,7 @@ const DEFAULT_SETTINGS: UserSettings = {
     aiAutoErrors: true,
     aiInlineSuggest: false,
     aiFileContext: true,
+    colorMode: 'dark',
 };
 let userSettings: UserSettings = { ...DEFAULT_SETTINGS };
 const SETTINGS_FILE = nodePath.join(nodeOs.homedir(), '.nexia-ide-prefs.json');
@@ -187,6 +216,135 @@ function loadUserSettings() {
 
 function saveUserSettings() {
     try { nodeFs.writeFileSync(SETTINGS_FILE, JSON.stringify(userSettings, null, 2)); } catch {}
+    // Also push to cloud if logged in (debounced)
+    scheduleCloudSync();
+}
+
+let _cloudSyncTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleCloudSync() {
+    if (_cloudSyncTimer) clearTimeout(_cloudSyncTimer);
+    _cloudSyncTimer = setTimeout(async () => {
+        _cloudSyncTimer = null;
+        if (!authService.isLoggedIn()) return;
+        try {
+            const cloudData: any = { ...userSettings };
+            // Also include Discord auth if present
+            const _dau = getDiscordAuthUser();
+            if (_dau) {
+                cloudData.discord = _dau;
+            }
+            // Include GitHub config if present
+            const ghConfigFile = nodePath.join(nodeOs.homedir(), '.nexia-ide-github.json');
+            try {
+                if (nodeFs.existsSync(ghConfigFile)) {
+                    cloudData.github = JSON.parse(nodeFs.readFileSync(ghConfigFile, 'utf-8'));
+                }
+            } catch {}
+            await authService.saveCloudSettings(cloudData);
+        } catch {}
+    }, 2000); // 2 second debounce
+}
+
+async function pullCloudSettings() {
+    if (!authService.isLoggedIn()) return;
+    try {
+        const result = await authService.loadCloudSettings();
+        if (!result || !result.settings || Object.keys(result.settings).length === 0) return;
+        const cloud = result.settings as any;
+
+        // Merge cloud settings into local — cloud wins for preferences
+        const prefKeys = [
+            'fontSize', 'accentColor', 'bgDark', 'bgMain', 'bgPanel', 'bgSidebar',
+            'editorBg', 'textColor', 'textDim', 'fancyEffects', 'layout', 'cornerRadius',
+            'compactMode', 'colorMode', 'aiProvider', 'aiApiKey', 'aiEndpoint', 'aiModel',
+            'aiSystemPrompt', 'aiAutoErrors', 'aiInlineSuggest', 'aiFileContext',
+        ];
+        for (const key of prefKeys) {
+            if (cloud[key] !== undefined) {
+                (userSettings as any)[key] = cloud[key];
+            }
+        }
+        // Save merged settings locally
+        try { nodeFs.writeFileSync(SETTINGS_FILE, JSON.stringify(userSettings, null, 2)); } catch {}
+
+        // Restore Discord auth from cloud
+        if (cloud.discord && cloud.discord.accessToken) {
+            setDiscordAuthUser({
+                id: cloud.discord.id,
+                username: cloud.discord.username,
+                avatarUrl: cloud.discord.avatarUrl || null,
+            });
+            // Also persist to main process
+            await ipcRenderer.invoke(IPC.DISCORD_AUTH_START).catch(() => {});
+            // Store the discord user data for the main process
+            const discordSettingsFile = nodePath.join(nodeOs.homedir(), '.nexia-ide-discord-user.json');
+            try { nodeFs.writeFileSync(discordSettingsFile, JSON.stringify(cloud.discord, null, 2)); } catch {}
+        }
+
+        // Restore GitHub auth from cloud
+        if (cloud.github && cloud.github.token) {
+            const ghConfigFile = nodePath.join(nodeOs.homedir(), '.nexia-ide-github.json');
+            try { nodeFs.writeFileSync(ghConfigFile, JSON.stringify(cloud.github, null, 2)); } catch {}
+        }
+
+        // Apply theme
+        applyThemeColors();
+        appendOutput('Cloud settings synced.\n');
+    } catch {}
+}
+
+// ── Session State (open tabs, active file, last project) ──
+interface SessionState {
+    lastProjectPath?: string;
+    openFiles?: string[];
+    activeFile?: string | null;
+}
+
+const SESSION_FILE = nodePath.join(nodeOs.homedir(), '.nexia-ide-session.json');
+
+function loadSession(): SessionState {
+    try {
+        if (nodeFs.existsSync(SESSION_FILE)) {
+            return JSON.parse(nodeFs.readFileSync(SESSION_FILE, 'utf-8'));
+        }
+    } catch {}
+    return {};
+}
+
+function saveSession() {
+    try {
+        const session: SessionState = {
+            lastProjectPath: currentProject?.path || undefined,
+            openFiles: openTabs
+                .filter(t => !t.path.startsWith('__'))  // Skip virtual tabs (XEX inspector, etc.)
+                .map(t => t.path),
+            activeFile: activeTab && !activeTab.startsWith('__') ? activeTab : null,
+        };
+        nodeFs.writeFileSync(SESSION_FILE, JSON.stringify(session, null, 2));
+    } catch {}
+}
+
+async function restoreSession() {
+    const session = loadSession();
+    if (!session.lastProjectPath || !session.openFiles?.length) return;
+
+    // Only restore if the same project was reopened (or auto-opened)
+    if (!currentProject || currentProject.path !== session.lastProjectPath) return;
+
+    // Re-open each file that still exists
+    for (const filePath of session.openFiles) {
+        try {
+            if (nodeFs.existsSync(filePath)) {
+                await openFile(filePath);
+            }
+        } catch {}
+    }
+
+    // Switch to the previously active tab
+    if (session.activeFile && openTabs.find(t => t.path === session.activeFile)) {
+        switchToTab(session.activeFile);
+    }
 }
 
 function applyThemeColors() {
@@ -250,8 +408,71 @@ function applyThemeColors() {
     }
 }
 
+function applyColorMode(mode: string) {
+    document.documentElement.dataset.colorMode = mode;
+    userSettings.colorMode = mode;
+    saveUserSettings();
+
+    if (mode === 'auto') {
+        const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+        document.documentElement.classList.toggle('light-mode', !prefersDark);
+    } else if (mode === 'light') {
+        document.documentElement.classList.add('light-mode');
+    } else {
+        document.documentElement.classList.remove('light-mode');
+    }
+}
+
 function applyFancyMode() {
     document.body.classList.toggle('fancy', userSettings.fancyEffects);
+}
+
+function applyLayout() {
+    const layout = userSettings.layout || 'sidebar-left';
+    const root = document.documentElement;
+
+    /* Reset layout classes */
+    document.body.classList.remove('layout-sidebar-left', 'layout-sidebar-right', 'layout-ai-right');
+
+    if (layout === 'sidebar-right') {
+        document.body.classList.add('layout-sidebar-right');
+    } else if (layout === 'ai-right') {
+        document.body.classList.add('layout-ai-right');
+    } else {
+        document.body.classList.add('layout-sidebar-left');
+    }
+
+    /* Mark active layout option in settings */
+    document.querySelectorAll('.layout-option').forEach(o => {
+        o.classList.toggle('active', (o as HTMLElement).dataset.layout === layout);
+    });
+}
+
+function applyCornerRadius() {
+    const radius = userSettings.cornerRadius || 'rounded';
+    const root = document.documentElement;
+    const map: Record<string, string[]> = {
+        'sharp':   ['0px', '0px', '0px', '0px', '0px'],
+        'subtle':  ['2px', '3px', '4px', '4px', '6px'],
+        'rounded': ['3px', '4px', '6px', '8px', '12px'],
+        'pill':    ['4px', '6px', '10px', '14px', '20px'],
+    };
+    const vals = map[radius] || map['rounded'];
+    root.style.setProperty('--radius-xs', vals[0]);
+    root.style.setProperty('--radius-sm', vals[1]);
+    root.style.setProperty('--radius-md', vals[2]);
+    root.style.setProperty('--radius-lg', vals[3]);
+    root.style.setProperty('--radius-xl', vals[4]);
+
+    const sel = document.getElementById('setting-corner-radius') as HTMLSelectElement;
+    if (sel) sel.value = radius;
+}
+
+function applyCompactMode() {
+    const compact = userSettings.compactMode || false;
+    document.body.classList.toggle('compact-mode', compact);
+    const cb = document.getElementById('setting-compact-mode') as HTMLInputElement;
+    if (cb) cb.checked = compact;
 }
 
 function shiftColor(hex: string, amount: number): string {
@@ -306,7 +527,15 @@ $$('.menu-item').forEach(item => {
     });
 });
 
-document.addEventListener('click', () => closeAllMenus());
+document.addEventListener('click', (e) => {
+    const target = e.target as HTMLElement;
+    // Don't close menus when interacting with form controls inside dropdowns (e.g. <select>)
+    if (target.closest('.menu-config-row') || target.tagName === 'SELECT' || target.tagName === 'OPTION') return;
+    closeAllMenus();
+});
+
+// Extra safety: prevent the config select from bubbling events that could close the menu
+$('config-select')?.addEventListener('mousedown', (e) => e.stopPropagation());
 
 // Wire up menu actions
 function menuAction(id: string, fn: () => void) {
@@ -330,7 +559,8 @@ menuAction('menu-goto-line', () => showGoToLine());
 menuAction('menu-build', () => doBuild());
 menuAction('menu-rebuild', () => doRebuild());
 menuAction('menu-clean', () => doClean());
-menuAction('menu-deploy', () => $('btn-deploy').click());
+menuAction('menu-deploy', () => doDeploy());
+menuAction('menu-project-props', () => openProjectProperties());
 menuAction('menu-toggle-sidebar', () => toggleSidebar());
 menuAction('menu-toggle-output', () => toggleBottomPanel());
 menuAction('menu-extensions', () => {
@@ -345,18 +575,23 @@ menuAction('menu-settings', () => showSettingsPanel());
 // ══════════════════════════════════════
 //  SIDEBAR TABS
 // ══════════════════════════════════════
+let activePanel = 'explorer';
 $$('.sidebar-tab').forEach(tab => {
     tab.addEventListener('click', () => {
         $$('.sidebar-tab').forEach(t => t.classList.remove('active'));
         $$('.sidebar-panel').forEach(p => p.classList.remove('active'));
         tab.classList.add('active');
-        $(`panel-${(tab as HTMLElement).dataset.panel}`).classList.add('active');
+        const panel = (tab as HTMLElement).dataset.panel!;
+        activePanel = panel;
+        $(`panel-${panel}`).classList.add('active');
         // Refresh dynamic panels
-        const panel = (tab as HTMLElement).dataset.panel;
         if (panel === 'study') renderStudyPanel();
         if (panel === 'learn') renderLearnPanel();
         if (panel === 'extensions') renderExtensionsPanel();
+        if (panel === 'git') { renderGitPanel(); checkGitConfiguration(); }
         if (panel === 'search') setTimeout(() => ($('search-query') as HTMLInputElement).focus(), 50);
+        if (panel === 'ai') checkAIConfiguration();
+        if (panel === 'devkit') checkDevkitConfiguration();
     });
 });
 
@@ -371,6 +606,9 @@ $$('.bottom-tab').forEach(tab => {
         $(`${(tab as HTMLElement).dataset.panel}-panel`).classList.add('active');
         // Refresh tips when switching to tips tab
         if ((tab as HTMLElement).dataset.panel === 'tips') renderTipsPanel();
+        if ((tab as HTMLElement).dataset.panel === 'visualizer') {
+            setTimeout(() => { codeVisualizer.resizeCanvas(); codeVisualizer.render(); }, 50);
+        }
     });
 });
 
@@ -479,7 +717,6 @@ function initMonaco() {
             'vs/nls': { availableLanguages: { '*': '' } }
         });
         amdRequire(['vs/editor/editor.main'], () => {
-            appendOutput('Editor loaded successfully.\n');
             createEditor();
         }, (err: any) => {
             appendOutput('Error loading Monaco modules: ' + JSON.stringify(err) + '\n');
@@ -534,6 +771,10 @@ function createEditor() {
         tabSize: 4, renderWhitespace: 'selection', wordWrap: 'off',
         suggestOnTriggerCharacters: true,
     });
+
+    // Wire editor to shared context for extracted modules
+    appCtx.editor = editor;
+    appCtx.monaco = monaco;
 
     editor.onDidChangeCursorPosition((e: any) => {
         $('status-line').textContent = `Ln ${e.position.lineNumber}, Col ${e.position.column}`;
@@ -603,7 +844,6 @@ function createEditor() {
         if (userSettings.aiInlineSuggest) triggerInlineSuggestion();
     });
 
-    appendOutput('Editor ready.\n');
     monacoResolve();
 }
 
@@ -630,6 +870,137 @@ function registerXbox360Completions(monaco: any) {
 // ══════════════════════════════════════
 //  FILE OPERATIONS
 // ══════════════════════════════════════
+// ══════════════════════════════════════
+//  FILE CHANGE WATCHER
+// ══════════════════════════════════════
+
+/**
+ * Start watching a file for external changes.
+ * When a change is detected, prompts the user to reload or keep their version.
+ */
+function watchFile(filePath: string) {
+    // Don't watch virtual tabs (XEX inspector, etc.)
+    if (filePath.startsWith('__')) return;
+    // Already watching
+    if (fileWatchers.has(filePath)) return;
+
+    try {
+        const stat = nodeFs.statSync(filePath);
+        let lastMtime = stat.mtimeMs;
+        let debounceTimer: any = null;
+
+        const watcher = nodeFs.watch(filePath, { persistent: false }, (eventType: string) => {
+            if (eventType !== 'change') return;
+
+            const entry = fileWatchers.get(filePath);
+            if (!entry) return;
+
+            // If we just saved this file ourselves, ignore the next change event
+            if (entry.ignoreNext) {
+                entry.ignoreNext = false;
+                return;
+            }
+
+            // Debounce — some editors/tools trigger multiple change events
+            if (debounceTimer) clearTimeout(debounceTimer);
+            debounceTimer = setTimeout(() => {
+                try {
+                    const newStat = nodeFs.statSync(filePath);
+                    // Only prompt if mtime actually changed
+                    if (newStat.mtimeMs <= lastMtime) return;
+                    lastMtime = newStat.mtimeMs;
+                    promptFileChanged(filePath);
+                } catch {
+                    // File may have been deleted — handled by rename event
+                }
+            }, 250);
+        });
+
+        fileWatchers.set(filePath, { watcher, mtime: lastMtime, ignoreNext: false });
+    } catch {
+        // File doesn't exist or can't be watched — ignore silently
+    }
+}
+
+/**
+ * Stop watching a file (called when tab is closed).
+ */
+function unwatchFile(filePath: string) {
+    const entry = fileWatchers.get(filePath);
+    if (entry) {
+        try { entry.watcher.close(); } catch {}
+        fileWatchers.delete(filePath);
+    }
+}
+
+/**
+ * Mark a file as "we're about to write to it" so the watcher ignores
+ * the next change event (prevents self-triggering on save).
+ */
+function ignoreNextChange(filePath: string) {
+    const entry = fileWatchers.get(filePath);
+    if (entry) entry.ignoreNext = true;
+}
+
+/**
+ * Show a prompt when a file has been changed externally.
+ */
+function promptFileChanged(filePath: string) {
+    const tab = openTabs.find(t => t.path === filePath);
+    if (!tab) return;
+
+    const fileName = nodePath.basename(filePath);
+
+    // If the tab has no unsaved changes, silently reload
+    if (!tab.modified) {
+        reloadFileContent(filePath);
+        appendOutput(`Reloaded: ${fileName} (changed externally)\n`);
+        return;
+    }
+
+    // Tab has unsaved changes — ask the user
+    const reload = confirm(
+        `"${fileName}" has been modified outside of Nexia IDE.\n\n` +
+        `You have unsaved changes. Do you want to reload the file from disk?\n\n` +
+        `Click OK to reload (your changes will be lost)\n` +
+        `Click Cancel to keep your version`
+    );
+
+    if (reload) {
+        reloadFileContent(filePath);
+        appendOutput(`Reloaded: ${fileName} (changed externally)\n`);
+    } else {
+        appendOutput(`Kept local version: ${fileName} (external change ignored)\n`);
+    }
+}
+
+/**
+ * Reload a file's content from disk into its Monaco model.
+ */
+async function reloadFileContent(filePath: string) {
+    const tab = openTabs.find(t => t.path === filePath);
+    if (!tab) return;
+
+    try {
+        const content = await ipcRenderer.invoke(IPC.FILE_READ, filePath);
+        // Update the model without triggering the modified flag
+        tab.model.setValue(content);
+        tab.modified = false;
+        renderTabs();
+
+        // Update mtime in watcher
+        const entry = fileWatchers.get(filePath);
+        if (entry) {
+            try {
+                const stat = nodeFs.statSync(filePath);
+                entry.mtime = stat.mtimeMs;
+            } catch {}
+        }
+    } catch (err: any) {
+        appendOutput(`Failed to reload ${nodePath.basename(filePath)}: ${err.message}\n`);
+    }
+}
+
 async function openFile(filePath: string) {
     await monacoReady;
 
@@ -661,7 +1032,9 @@ async function openFile(filePath: string) {
         openTabs.push({ path: filePath, name: nodePath.basename(filePath), model, modified: false });
         switchToTab(filePath);
         $('status-language').textContent = lang.toUpperCase();
+        watchFile(filePath);
         onFileOpened(filePath);
+        saveSession();
     } catch (err: any) {
         appendOutput(`Error opening file: ${err.message}\n`);
     }
@@ -676,33 +1049,47 @@ function switchToTab(filePath: string) {
     if (filePath.startsWith('__xex_inspector__:')) {
         $('editor-container').style.display = 'none';
         $('welcome-screen').style.display = 'none';
+        if (cinematicContainer) cinematicContainer.style.display = 'none';
         if (xexInspectorContainer) xexInspectorContainer.style.display = 'block';
+    // Handle Cinematic Tutor tabs
+    } else if (filePath.startsWith('__cinematic__:')) {
+        $('editor-container').style.display = 'none';
+        $('welcome-screen').style.display = 'none';
+        if (xexInspectorContainer) xexInspectorContainer.style.display = 'none';
+        if (cinematicContainer) {
+            cinematicContainer.style.display = 'flex';
+        }
     } else {
         if (xexInspectorContainer) xexInspectorContainer.style.display = 'none';
+        if (cinematicContainer) cinematicContainer.style.display = 'none';
         if (editor) editor.setModel(tab.model);
         $('editor-container').style.display = 'block';
         $('welcome-screen').style.display = 'none';
         updateBreadcrumb(filePath);
     }
     renderTabs();
+    saveSession();
 }
 
 function closeTab(filePath: string) {
     const idx = openTabs.findIndex(t => t.path === filePath);
     if (idx === -1) return;
     const tab = openTabs[idx];
-    // Don't prompt save for XEX inspector tabs
-    if (!filePath.startsWith('__xex_inspector__:') && tab.modified) {
+    // Don't prompt save for special tabs
+    if (!filePath.startsWith('__xex_inspector__:') && !filePath.startsWith('__cinematic__:') && tab.modified) {
         const save = confirm(`"${tab.name}" has unsaved changes. Save before closing?`);
         if (save) {
+            ignoreNextChange(tab.path);
             ipcRenderer.invoke(IPC.FILE_WRITE, tab.path, tab.model.getValue());
         }
     }
     tab.model.dispose();
+    unwatchFile(filePath);
     openTabs.splice(idx, 1);
     if (activeTab === filePath) {
-        // Hide XEX inspector if it was active
+        // Hide special containers if they were active
         if (xexInspectorContainer) xexInspectorContainer.style.display = 'none';
+        if (cinematicContainer) { cinematicContainer.style.display = 'none'; cinematicEngine.unmount(); }
         if (openTabs.length > 0) {
             switchToTab(openTabs[Math.min(idx, openTabs.length - 1)].path);
         } else {
@@ -713,17 +1100,23 @@ function closeTab(filePath: string) {
         }
     }
     renderTabs();
+    saveSession();
 }
 
 function closeAllTabs() {
-    for (const tab of openTabs) tab.model.dispose();
+    for (const tab of openTabs) {
+        unwatchFile(tab.path);
+        tab.model.dispose();
+    }
     openTabs = [];
     activeTab = null;
     $('editor-container').style.display = 'none';
     if (xexInspectorContainer) xexInspectorContainer.style.display = 'none';
+    if (cinematicContainer) { cinematicContainer.style.display = 'none'; cinematicEngine.unmount(); }
     $('welcome-screen').style.display = 'flex';
     updateBreadcrumb();
     renderTabs();
+    saveSession();
 }
 
 function renderTabs() {
@@ -734,7 +1127,7 @@ function renderTabs() {
         el.className = `editor-tab${tab.path === activeTab ? ' active' : ''}`;
         el.innerHTML = `<span class="${tab.modified ? 'tab-modified' : ''}">${tab.modified ? '● ' : ''}${tab.name}</span><button class="tab-close">✕</button>`;
         el.addEventListener('click', (e) => {
-            if ((e.target as HTMLElement).classList.contains('tab-close')) closeTab(tab.path);
+            if ((e.target as HTMLElement).closest('.tab-close')) closeTab(tab.path);
             else switchToTab(tab.path);
         });
         bar.appendChild(el);
@@ -742,223 +1135,12 @@ function renderTabs() {
 }
 
 // ══════════════════════════════════════
-//  XEX INSPECTOR
+//  XEX INSPECTOR — Extracted to editor/xexInspector.ts
 // ══════════════════════════════════════
-let xexInspectorContainer: HTMLElement | null = null;
+const xexMod = require('./editor/xexInspector');
+const { openXexInspector, showXexInspector, switchToXexTab, setupXexDropZone } = xexMod;
+let xexInspectorContainer = xexMod.xexInspectorContainer;
 
-async function openXexInspector(xexPath?: string) {
-    try {
-        const data = await ipcRenderer.invoke(IPC.XEX_INSPECT, xexPath || undefined);
-        if (!data) return; // User cancelled
-        showXexInspector(data);
-    } catch (err: any) {
-        appendOutput(`XEX Inspector error: ${err.message}\n`);
-    }
-}
-
-function showXexInspector(data: any) {
-    // Create or reuse the inspector container
-    if (!xexInspectorContainer) {
-        xexInspectorContainer = document.createElement('div');
-        xexInspectorContainer.id = 'xex-inspector';
-        $('editor-area').appendChild(xexInspectorContainer);
-    }
-
-    // Add as a pseudo-tab
-    const tabPath = `__xex_inspector__:${data.filePath || 'xex'}`;
-    const existing = openTabs.find(t => t.path === tabPath);
-    if (existing) {
-        switchToXexTab(tabPath, data);
-        return;
-    }
-
-    // Create a dummy model (won't be used by Monaco)
-    const monaco = (window as any).monaco;
-    const model = monaco?.editor?.createModel?.('', 'plaintext') || { dispose: () => {}, getValue: () => '' };
-
-    openTabs.push({ path: tabPath, name: `🔍 ${data.fileName || 'XEX Inspector'}`, model, modified: false });
-    switchToXexTab(tabPath, data);
-}
-
-function switchToXexTab(tabPath: string, data: any) {
-    activeTab = tabPath;
-    // Hide Monaco editor, show XEX inspector
-    $('editor-container').style.display = 'none';
-    $('welcome-screen').style.display = 'none';
-    if (xexInspectorContainer) {
-        xexInspectorContainer.style.display = 'block';
-        xexInspectorContainer.innerHTML = renderXexInspectorHtml(data);
-        // Attach drag-drop handler
-        setupXexDropZone();
-    }
-    renderTabs();
-}
-
-function setupXexDropZone() {
-    const dropZone = document.getElementById('xex-drop-zone');
-    if (!dropZone) return;
-    dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('xex-drag-over'); });
-    dropZone.addEventListener('dragleave', () => dropZone.classList.remove('xex-drag-over'));
-    dropZone.addEventListener('drop', (e) => {
-        e.preventDefault();
-        dropZone.classList.remove('xex-drag-over');
-        const files = e.dataTransfer?.files;
-        if (files && files.length > 0) {
-            const file = files[0];
-            if (file.path) openXexInspector(file.path);
-        }
-    });
-}
-
-function renderXexInspectorHtml(data: any): string {
-    if (data.error && !data.valid) {
-        return `
-        <div class="xex-inspector-content">
-            <div class="xex-header-bar">
-                <h2>🔍 XEX Inspector</h2>
-                <span class="xex-file-path">${escHtml(data.filePath || '')}</span>
-            </div>
-            <div id="xex-drop-zone" class="xex-drop-zone">
-                <div class="xex-drop-icon">📦</div>
-                <div class="xex-drop-text">Drop a .xex file here to inspect</div>
-                <div class="xex-drop-hint">or use View → Inspect XEX...</div>
-            </div>
-            <div class="xex-error-box">⚠ ${escHtml(data.error)}</div>
-        </div>`;
-    }
-
-    let html = `<div class="xex-inspector-content">`;
-
-    // Header bar
-    html += `<div class="xex-header-bar">
-        <h2>🔍 XEX Inspector</h2>
-        <div id="xex-drop-zone" class="xex-drop-zone xex-drop-zone-mini">
-            <span>📦 Drop another .xex here</span>
-        </div>
-    </div>`;
-
-    // File overview
-    html += `<div class="xex-section">
-        <div class="xex-section-title">📄 File Overview</div>
-        <div class="xex-info-grid">
-            <div class="xex-info-row"><span class="xex-label">File</span><span class="xex-value">${escHtml(data.fileName)}</span></div>
-            <div class="xex-info-row"><span class="xex-label">Path</span><span class="xex-value xex-path">${escHtml(data.filePath)}</span></div>
-            <div class="xex-info-row"><span class="xex-label">Size</span><span class="xex-value">${escHtml(data.fileSizeFormatted)} (${data.fileSize?.toLocaleString()} bytes)</span></div>
-            <div class="xex-info-row"><span class="xex-label">Format</span><span class="xex-value xex-tag xex-tag-ok">${escHtml(data.header?.magic || '?')}</span></div>`;
-
-    if (data.header?.originalPeName) {
-        html += `<div class="xex-info-row"><span class="xex-label">Original PE</span><span class="xex-value">${escHtml(data.header.originalPeName)}</span></div>`;
-    }
-    if (data.header?.peTimestamp) {
-        html += `<div class="xex-info-row"><span class="xex-label">PE Timestamp</span><span class="xex-value">${escHtml(data.header.peTimestamp)}</span></div>`;
-    }
-    if (data.header?.moduleFlagsDecoded?.length > 0) {
-        html += `<div class="xex-info-row"><span class="xex-label">Module Flags</span><span class="xex-value">${data.header.moduleFlagsDecoded.map((f: string) => `<span class="xex-tag">${escHtml(f)}</span>`).join(' ')}</span></div>`;
-    }
-    html += `</div></div>`;
-
-    // Execution info
-    if (data.executionInfo && Object.keys(data.executionInfo).length > 0) {
-        html += `<div class="xex-section">
-            <div class="xex-section-title">⚡ Execution Info</div>
-            <div class="xex-info-grid">`;
-        if (data.executionInfo.titleId) html += `<div class="xex-info-row"><span class="xex-label">Title ID</span><span class="xex-value xex-mono">${escHtml(data.executionInfo.titleId)}</span></div>`;
-        if (data.executionInfo.mediaId) html += `<div class="xex-info-row"><span class="xex-label">Media ID</span><span class="xex-value xex-mono">${escHtml(data.executionInfo.mediaId)}</span></div>`;
-        if (data.executionInfo.version) html += `<div class="xex-info-row"><span class="xex-label">Version</span><span class="xex-value">${escHtml(data.executionInfo.version)}</span></div>`;
-        if (data.executionInfo.baseVersion) html += `<div class="xex-info-row"><span class="xex-label">Base Version</span><span class="xex-value">${escHtml(data.executionInfo.baseVersion)}</span></div>`;
-        if (data.executionInfo.entryPoint) html += `<div class="xex-info-row"><span class="xex-label">Entry Point</span><span class="xex-value xex-mono">${escHtml(data.executionInfo.entryPoint)}</span></div>`;
-        if (data.executionInfo.imageBaseAddress) html += `<div class="xex-info-row"><span class="xex-label">Image Base</span><span class="xex-value xex-mono">${escHtml(data.executionInfo.imageBaseAddress)}</span></div>`;
-        if (data.executionInfo.discNumber) html += `<div class="xex-info-row"><span class="xex-label">Disc</span><span class="xex-value">${data.executionInfo.discNumber} of ${data.executionInfo.discCount}</span></div>`;
-        html += `</div></div>`;
-    }
-
-    // Sections
-    if (data.sections?.length > 0) {
-        html += `<div class="xex-section">
-            <div class="xex-section-title">📦 PE Sections (${data.sections.length})</div>
-            <table class="xex-table">
-                <thead><tr><th>Name</th><th>Virtual Addr</th><th>Virtual Size</th><th>Raw Size</th><th>Characteristics</th></tr></thead>
-                <tbody>`;
-        for (const sec of data.sections) {
-            const chars = sec.characteristics?.join(', ') || '';
-            html += `<tr>
-                <td class="xex-mono">${escHtml(sec.name)}</td>
-                <td class="xex-mono">${escHtml(sec.virtualAddress)}</td>
-                <td>${escHtml(sec.virtualSizeFormatted)}</td>
-                <td>${escHtml(sec.rawDataSizeFormatted)}</td>
-                <td><span class="xex-chars">${escHtml(chars)}</span></td>
-            </tr>`;
-        }
-        html += `</tbody></table></div>`;
-    }
-
-    // Imports
-    if (data.imports?.length > 0) {
-        html += `<div class="xex-section">
-            <div class="xex-section-title">📥 Import Libraries (${data.imports.length})</div>
-            <div class="xex-imports-list">`;
-        for (const imp of data.imports) {
-            html += `<div class="xex-import-item"><span class="xex-mono">${escHtml(imp.library)}</span></div>`;
-        }
-        html += `</div></div>`;
-    }
-
-    // Resources
-    if (data.resources?.length > 0) {
-        html += `<div class="xex-section">
-            <div class="xex-section-title">🗂 Resources (${data.resources.length})</div>
-            <table class="xex-table">
-                <thead><tr><th>Name</th><th>Address</th><th>Size</th></tr></thead>
-                <tbody>`;
-        for (const res of data.resources) {
-            html += `<tr>
-                <td class="xex-mono">${escHtml(res.name)}</td>
-                <td class="xex-mono">${escHtml(res.address)}</td>
-                <td>${escHtml(res.sizeFormatted)}</td>
-            </tr>`;
-        }
-        html += `</tbody></table></div>`;
-    }
-
-    // Optional headers (collapsible raw view)
-    if (data.optionalHeaders?.length > 0) {
-        html += `<div class="xex-section">
-            <div class="xex-section-title xex-collapsible" onclick="this.parentElement.classList.toggle('xex-collapsed')">
-                ▶ Optional Headers (${data.optionalHeaders.length})
-            </div>
-            <table class="xex-table xex-collapsible-body">
-                <thead><tr><th>ID</th><th>Name</th><th>Data</th></tr></thead>
-                <tbody>`;
-        for (const h of data.optionalHeaders) {
-            const extra = h.value ? ` → ${typeof h.value === 'string' ? escHtml(h.value) : h.valueFormatted || h.value}` : '';
-            html += `<tr>
-                <td class="xex-mono">${escHtml(h.idHex)}</td>
-                <td>${escHtml(h.name)}</td>
-                <td class="xex-mono">${escHtml(h.dataHex)}${extra}</td>
-            </tr>`;
-        }
-        html += `</tbody></table></div>`;
-    }
-
-    // Security info
-    if (data.securityInfo?.imageSize) {
-        html += `<div class="xex-section">
-            <div class="xex-section-title">🔒 Security Info</div>
-            <div class="xex-info-grid">
-                <div class="xex-info-row"><span class="xex-label">Image Size</span><span class="xex-value">${escHtml(data.securityInfo.imageSizeFormatted)}</span></div>
-            </div>
-        </div>`;
-    }
-
-    html += `</div>`;
-    return html;
-}
-
-function escHtml(str: string): string {
-    const div = document.createElement('div');
-    div.textContent = str;
-    return div.innerHTML;
-}
 
 // ══════════════════════════════════════
 //  SAVE
@@ -967,6 +1149,7 @@ async function saveCurrentFile() {
     if (!activeTab) return;
     const tab = openTabs.find(t => t.path === activeTab);
     if (!tab) return;
+    ignoreNextChange(tab.path);
     await ipcRenderer.invoke(IPC.FILE_WRITE, tab.path, tab.model.getValue());
     tab.modified = false;
     renderTabs();
@@ -977,6 +1160,7 @@ async function saveAllFiles(silent = false) {
     let saved = 0;
     for (const tab of openTabs) {
         if (tab.modified) {
+            ignoreNextChange(tab.path);
             await ipcRenderer.invoke(IPC.FILE_WRITE, tab.path, tab.model.getValue());
             tab.modified = false;
             saved++;
@@ -987,514 +1171,28 @@ async function saveAllFiles(silent = false) {
 }
 
 // ══════════════════════════════════════
-//  FILE TREE
+//  PROJECT PROPERTIES — Extracted to panels/projectProperties.ts
 // ══════════════════════════════════════
-async function refreshFileTree() {
-    const tree = await ipcRenderer.invoke(IPC.FILE_LIST);
-    const container = $('file-tree');
-    container.innerHTML = '';
-
-    if (!currentProject) {
-        renderFileTree(tree, container, 0);
-        return;
-    }
-
-    // ── Project root node (like VS Solution Explorer) ──
-    const rootNode = document.createElement('div');
-    rootNode.className = 'project-root-node';
-    rootNode.innerHTML = `<span class="tree-arrow expanded">▶</span><span class="project-root-icon">🎮</span><span>${currentProject.name}</span>`;
-
-    const rootChildren = document.createElement('div');
-    rootChildren.className = 'tree-children open';
-
-    rootNode.addEventListener('click', () => {
-        rootChildren.classList.toggle('open');
-        const arrow = rootNode.querySelector('.tree-arrow')!;
-        arrow.classList.toggle('expanded');
-    });
-
-    // Right-click on project root
-    rootNode.addEventListener('contextmenu', (e: MouseEvent) => {
-        e.preventDefault();
-        showContextMenu(e.clientX, e.clientY, [
-            { label: 'New File...', action: () => inlineCreateItem('file') },
-            { label: 'New Folder...', action: () => inlineCreateItem('folder') },
-            { label: '─', action: () => {} },
-            { label: 'Add Existing File...', action: () => addExistingFile() },
-            { label: 'Upload Document...', action: () => uploadDocument() },
-            { label: '─', action: () => {} },
-            { label: 'Refresh', action: () => refreshFileTree() },
-            { label: '─', action: () => {} },
-            { label: 'Open in Explorer', action: () => { shell.openPath(currentProject.path); } },
-        ]);
-    });
-
-    container.appendChild(rootNode);
-
-    // ── Build virtual "Header Files" and "Source Files" groups ──
-    const HEADER_EXTS = new Set(['.h', '.hpp', '.hxx', '.inl']);
-    const SOURCE_EXTS = new Set(['.cpp', '.c', '.cc', '.cxx']);
-    const headerFiles: any[] = [];
-    const sourceFiles: any[] = [];
-    const otherNodes: any[] = [];
-
-    // Collect all files recursively from the tree
-    function collectFiles(nodes: any[], inSourceDir: boolean = false) {
-        for (const node of nodes) {
-            if (node.isDirectory) {
-                const lname = node.name.toLowerCase();
-                // Flatten include/ and src/ directories — their contents go into virtual groups
-                if (lname === 'include' || lname === 'src' || inSourceDir) {
-                    if (node.children) collectFiles(node.children, true);
-                } else {
-                    otherNodes.push(node);
-                }
-            } else {
-                const ext = (node.extension || '').toLowerCase();
-                if (HEADER_EXTS.has(ext)) {
-                    headerFiles.push(node);
-                } else if (SOURCE_EXTS.has(ext)) {
-                    sourceFiles.push(node);
-                } else {
-                    otherNodes.push(node);
-                }
-            }
-        }
-    }
-    collectFiles(tree);
-
-    // Render "Header Files" virtual folder
-    if (headerFiles.length > 0) {
-        const vfolder = createVirtualFolder('Header Files', '📋', headerFiles, 1);
-        rootChildren.appendChild(vfolder);
-    }
-
-    // Render "Source Files" virtual folder
-    if (sourceFiles.length > 0) {
-        const vfolder = createVirtualFolder('Source Files', '📄', sourceFiles, 1);
-        rootChildren.appendChild(vfolder);
-    }
-
-    // Render remaining nodes normally
-    renderFileTree(otherNodes, rootChildren, 1, false);
-
-    container.appendChild(rootChildren);
+let _projectPropsMod: any;
+try {
+    _projectPropsMod = require('./panels/projectProperties');
+} catch (err: any) {
+    console.error('[ProjectProps] Module load failed:', err.message);
+    _projectPropsMod = { initProjectProperties: () => {}, openProjectProperties: () => {} };
 }
+const { openProjectProperties } = _projectPropsMod;
 
-function createVirtualFolder(name: string, icon: string, files: any[], depth: number): HTMLElement {
-    const wrapper = document.createElement('div');
-    const slug = name.toLowerCase().replace(/\s+/g, '-');
-    wrapper.className = `virtual-folder virtual-folder-${slug}`;
-
-    const header = document.createElement('div');
-    header.className = 'tree-item';
-    header.style.paddingLeft = (8 + depth * 16) + 'px';
-    header.innerHTML = `<span class="tree-arrow">▶</span><span class="tree-icon">${icon}</span><span class="tree-name">${name}</span>`;
-
-    const children = document.createElement('div');
-    children.className = 'tree-children';
-
-    header.addEventListener('click', () => {
-        children.classList.toggle('open');
-        const arrow = header.querySelector('.tree-arrow')! as HTMLElement;
-        if (children.classList.contains('open')) {
-            arrow.textContent = '▼'; arrow.classList.add('expanded');
-        } else {
-            arrow.textContent = '▶'; arrow.classList.remove('expanded');
-        }
-    });
-
-    // Right-click on virtual folder
-    header.addEventListener('contextmenu', (e: MouseEvent) => {
-        e.preventDefault();
-        showContextMenu(e.clientX, e.clientY, [
-            { label: 'New File...', action: () => inlineCreateItem('file') },
-            { label: '─', action: () => {} },
-            { label: 'Add Existing File...', action: () => addExistingFile() },
-        ]);
-    });
-
-    // Render files inside
-    for (const file of files) {
-        const fi = document.createElement('div');
-        fi.className = 'tree-item';
-        fi.style.paddingLeft = (8 + (depth + 1) * 16 + 20) + 'px';
-        fi.innerHTML = `<span class="tree-icon">${getFileIcon(file.extension || '')}</span><span class="tree-name">${file.name}</span>`;
-        fi.addEventListener('click', () => openFile(file.path));
-        fi.addEventListener('contextmenu', (e: MouseEvent) => {
-            e.preventDefault();
-            showContextMenu(e.clientX, e.clientY, [
-                { label: 'Open', action: () => openFile(file.path) },
-                { label: '─', action: () => {} },
-                { label: 'Rename...', action: () => renameFile(file.path) },
-                { label: 'Delete', action: () => deleteFile(file.path) },
-                { label: '─', action: () => {} },
-                { label: 'Copy Path', action: () => { navigator.clipboard.writeText(file.path); } },
-                { label: 'Reveal in Explorer', action: () => { shell.showItemInFolder(file.path); } },
-            ]);
-        });
-        fi.draggable = true;
-        fi.addEventListener('dragstart', (e: DragEvent) => {
-            e.dataTransfer!.setData('nexia/filepath', file.path);
-            e.dataTransfer!.setData('nexia/isdir', 'false');
-            e.dataTransfer!.effectAllowed = 'move';
-            fi.classList.add('dragging');
-        });
-        fi.addEventListener('dragend', () => { fi.classList.remove('dragging'); });
-        children.appendChild(fi);
-    }
-
-    wrapper.appendChild(header);
-    wrapper.appendChild(children);
-    return wrapper;
+// ══════════════════════════════════════
+//  FILE TREE — Extracted to panels/fileTree.ts
+// ══════════════════════════════════════
+let _fileTreeMod: any;
+try {
+    _fileTreeMod = require('./panels/fileTree');
+} catch (err: any) {
+    console.error('[FileTree] Module load failed:', err.message);
+    _fileTreeMod = { initFileTree: () => {}, refreshFileTree: async () => {}, inlineCreateItem: () => {}, getFileIcon: () => '📄' };
 }
-
-// Explorer action buttons
-$('explorer-new-file').addEventListener('click', () => {
-    if (!currentProject) { appendOutput('Open a project first.\n'); return; }
-    inlineCreateItem('file');
-});
-$('explorer-new-folder').addEventListener('click', () => {
-    if (!currentProject) { appendOutput('Open a project first.\n'); return; }
-    inlineCreateItem('folder');
-});
-$('explorer-refresh').addEventListener('click', () => refreshFileTree());
-$('explorer-collapse').addEventListener('click', () => {
-    $('file-tree').querySelectorAll('.tree-children.open').forEach((el: Element) => {
-        el.classList.remove('open');
-        const arrow = el.previousElementSibling?.querySelector('.tree-arrow');
-        if (arrow) { arrow.textContent = '▶'; arrow.classList.remove('expanded'); }
-    });
-});
-
-/**
- * Inline creation — inserts a temporary editable tree item in the explorer.
- * On Enter the file/folder is actually created. On Escape/blur it is cancelled.
- */
-function inlineCreateItem(kind: 'file' | 'folder') {
-    // Remove any existing inline editor first
-    document.querySelectorAll('.tree-inline-new').forEach(el => el.remove());
-
-    // Decide where to insert the inline item and ensure the container is open
-    let container: HTMLElement | null = null;
-    if (kind === 'file') {
-        // Put it inside the "Source Files" virtual folder children
-        container = $('file-tree').querySelector('.virtual-folder-source-files .tree-children') as HTMLElement;
-        if (container) {
-            container.classList.add('open');
-            const arrow = container.previousElementSibling?.querySelector('.tree-arrow') as HTMLElement;
-            if (arrow) { arrow.textContent = '▼'; arrow.classList.add('expanded'); }
-        }
-    }
-    if (!container) {
-        // Fallback: put it inside the root children
-        const rootChildren = $('file-tree').querySelector('.tree-children') as HTMLElement;
-        container = rootChildren || $('file-tree');
-    }
-
-    const defaultName = kind === 'file' ? 'NewFile.cpp' : 'NewFolder';
-    const icon = kind === 'file' ? '<span class="ficon ficon-cpp">C++</span>' : '📁';
-    const depth = kind === 'file' ? 2 : 1;
-
-    // Create the temporary inline row
-    const row = document.createElement('div');
-    row.className = 'tree-item tree-inline-new';
-    row.style.paddingLeft = (8 + depth * 16 + (kind === 'file' ? 20 : 0)) + 'px';
-    row.innerHTML = `<span class="tree-icon">${icon}</span>`;
-
-    const input = document.createElement('input');
-    input.type = 'text';
-    input.className = 'tree-inline-input';
-    input.value = defaultName;
-    input.spellcheck = false;
-    row.appendChild(input);
-
-    // Insert at the top of the container
-    container.insertBefore(row, container.firstChild);
-    input.focus();
-    // Select just the name part (before extension for files)
-    if (kind === 'file') {
-        const dotIdx = defaultName.lastIndexOf('.');
-        input.setSelectionRange(0, dotIdx > 0 ? dotIdx : defaultName.length);
-    } else {
-        input.select();
-    }
-
-    let committed = false;
-
-    async function commit() {
-        if (committed) return;
-        committed = true;
-        const name = input.value.trim();
-        if (!name || !currentProject) {
-            row.remove();
-            return;
-        }
-        const srcDir = nodePath.join(currentProject.path, 'src');
-        try {
-            if (kind === 'file') {
-                const filePath = nodePath.join(srcDir, name);
-                let content = '';
-                if (/\.(cpp|c|cc|cxx)$/i.test(name)) content = '#include "stdafx.h"\n\n';
-                else if (/\.(h|hpp)$/i.test(name)) {
-                    const guard = name.toUpperCase().replace(/[^A-Z0-9]/g, '_') + '_';
-                    content = `#pragma once\n#ifndef ${guard}\n#define ${guard}\n\n\n\n#endif // ${guard}\n`;
-                }
-                await ipcRenderer.invoke(IPC.FILE_CREATE, filePath, content);
-                await refreshFileTree();
-                openFile(filePath);
-                appendOutput(`Created: ${name}\n`);
-            } else {
-                const fullPath = nodePath.join(srcDir, name);
-                nodeFs.mkdirSync(fullPath, { recursive: true });
-                await refreshFileTree();
-                appendOutput(`Created folder: ${name}\n`);
-            }
-        } catch (err: any) {
-            appendOutput(`Create failed: ${err.message}\n`);
-            row.remove();
-        }
-    }
-
-    function cancel() {
-        if (committed) return;
-        committed = true;
-        row.remove();
-    }
-
-    input.addEventListener('keydown', (e: KeyboardEvent) => {
-        e.stopPropagation(); // Prevent editor shortcuts from firing
-        if (e.key === 'Enter') { e.preventDefault(); commit(); }
-        if (e.key === 'Escape') { e.preventDefault(); cancel(); }
-    });
-    input.addEventListener('blur', () => {
-        // Small delay to let click on something else process first
-        setTimeout(() => { if (!committed) commit(); }, 150);
-    });
-}
-
-// Right-click on empty space in explorer
-$('file-tree').addEventListener('contextmenu', (e: MouseEvent) => {
-    // Only trigger if clicking empty space, not on a tree-item
-    if ((e.target as HTMLElement).closest('.tree-item')) return;
-    e.preventDefault();
-    if (!currentProject) return;
-    const srcDir = nodePath.join(currentProject.path, 'src');
-    showContextMenu(e.clientX, e.clientY, [
-        { label: 'New File...', action: () => inlineCreateItem('file') },
-        { label: 'New Folder...', action: () => inlineCreateItem('folder') },
-        { label: '─', action: () => {} },
-        { label: 'Add Existing File...', action: () => addExistingFile() },
-        { label: 'Upload Document...', action: () => uploadDocument() },
-        { label: '─', action: () => {} },
-        { label: 'Refresh', action: () => refreshFileTree() },
-        { label: '─', action: () => {} },
-        { label: 'Open in Explorer', action: () => { shell.openPath(currentProject.path); } },
-    ]);
-});
-
-// Drop onto empty space in file tree → move to project root
-$('file-tree').addEventListener('dragover', (e: DragEvent) => {
-    if (!(e.target as HTMLElement).closest('.tree-item') && e.dataTransfer?.types.includes('nexia/filepath')) {
-        e.preventDefault();
-        e.dataTransfer!.dropEffect = 'move';
-    }
-});
-$('file-tree').addEventListener('drop', async (e: DragEvent) => {
-    if ((e.target as HTMLElement).closest('.tree-item')) return;
-    e.preventDefault();
-    if (!currentProject) return;
-    const srcPath = e.dataTransfer!.getData('nexia/filepath');
-    if (!srcPath) return;
-    const fileName = nodePath.basename(srcPath);
-    const destPath = nodePath.join(currentProject.path, 'src', fileName);
-    if (srcPath === destPath) return;
-    await moveFile(srcPath, destPath);
-});
-
-async function newFolderInProject() {
-    if (!currentProject) { appendOutput('Open a project first.\n'); return; }
-    const name = prompt('New folder name:');
-    if (!name || !name.trim()) return;
-    const fullPath = nodePath.join(currentProject.path, 'src', name.trim());
-    try {
-        nodeFs.mkdirSync(fullPath, { recursive: true });
-        await refreshFileTree();
-        appendOutput(`Created folder: src/${name.trim()}\n`);
-    } catch (err: any) { appendOutput(`Create folder failed: ${err.message}\n`); }
-}
-
-async function addExistingFile() {
-    if (!currentProject) { appendOutput('Open a project first.\n'); return; }
-    const filePath = await ipcRenderer.invoke(IPC.FILE_SELECT_FILE);
-    if (!filePath) return;
-    const fileName = nodePath.basename(filePath);
-    const srcDir = nodePath.join(currentProject.path, 'src');
-    if (!nodeFs.existsSync(srcDir)) nodeFs.mkdirSync(srcDir, { recursive: true });
-    const dest = nodePath.join(srcDir, fileName);
-    try {
-        nodeFs.copyFileSync(filePath, dest);
-        await refreshFileTree();
-        openFile(dest);
-        appendOutput(`Added: ${fileName}\n`);
-    } catch (err: any) { appendOutput(`Add file failed: ${err.message}\n`); }
-}
-
-function renderFileTree(nodes: any[], container: HTMLElement, depth: number, clear: boolean = true) {
-    if (clear) container.innerHTML = '';
-    for (const node of nodes) {
-        const item = document.createElement('div');
-        if (node.isDirectory) {
-            const header = document.createElement('div');
-            header.className = 'tree-item';
-            header.style.paddingLeft = (8 + depth * 16) + 'px';
-            header.innerHTML = `<span class="tree-arrow">▶</span><span class="tree-icon">📁</span><span class="tree-name">${node.name}</span>`;
-            const children = document.createElement('div');
-            children.className = 'tree-children';
-            if (node.children) renderFileTree(node.children, children, depth + 1);
-            header.addEventListener('click', () => {
-                children.classList.toggle('open');
-                const arrow = header.querySelector('.tree-arrow')! as HTMLElement;
-                const icon = header.querySelector('.tree-icon')!;
-                if (children.classList.contains('open')) {
-                    arrow.textContent = '▼'; arrow.classList.add('expanded'); icon.textContent = '📂';
-                } else {
-                    arrow.textContent = '▶'; arrow.classList.remove('expanded'); icon.textContent = '📁';
-                }
-            });
-            header.addEventListener('contextmenu', (e: MouseEvent) => {
-                e.preventDefault();
-                showContextMenu(e.clientX, e.clientY, [
-                    { label: 'New File Here...', action: () => newFileInFolder(node.path) },
-                    { label: '─', action: () => {} },
-                    { label: 'Rename...', action: () => renameFile(node.path) },
-                    { label: 'Delete Folder', action: () => deleteFile(node.path) },
-                    { label: '─', action: () => {} },
-                    { label: 'Copy Path', action: () => { navigator.clipboard.writeText(node.path); } },
-                    { label: 'Open in Explorer', action: () => { shell.openPath(node.path); } },
-                ]);
-            });
-
-            // --- Drag-and-drop: folders are drop targets ---
-            // Also make folders draggable to move entire folders
-            header.draggable = true;
-            header.addEventListener('dragstart', (e: DragEvent) => {
-                e.dataTransfer!.setData('nexia/filepath', node.path);
-                e.dataTransfer!.setData('nexia/isdir', 'true');
-                e.dataTransfer!.effectAllowed = 'move';
-                header.classList.add('dragging');
-            });
-            header.addEventListener('dragend', () => { header.classList.remove('dragging'); });
-            header.addEventListener('dragover', (e: DragEvent) => {
-                // Accept drops of files/folders but not onto self
-                const srcPath = e.dataTransfer?.types.includes('nexia/filepath') ? true : false;
-                if (!srcPath) return;
-                e.preventDefault();
-                e.dataTransfer!.dropEffect = 'move';
-                header.classList.add('drag-over');
-            });
-            header.addEventListener('dragleave', () => { header.classList.remove('drag-over'); });
-            header.addEventListener('drop', async (e: DragEvent) => {
-                e.preventDefault();
-                header.classList.remove('drag-over');
-                const srcPath = e.dataTransfer!.getData('nexia/filepath');
-                if (!srcPath) return;
-                const fileName = nodePath.basename(srcPath);
-                const destPath = nodePath.join(node.path, fileName);
-                // Don't drop onto self or into own subtree
-                if (srcPath === destPath || srcPath === node.path) return;
-                if (destPath.startsWith(srcPath + nodePath.sep)) return;
-                await moveFile(srcPath, destPath);
-            });
-
-            item.appendChild(header);
-            item.appendChild(children);
-        } else {
-            const fi = document.createElement('div');
-            fi.className = 'tree-item';
-            fi.style.paddingLeft = (8 + depth * 16 + 20) + 'px';
-            fi.innerHTML = `<span class="tree-icon">${getFileIcon(node.extension || '')}</span><span class="tree-name">${node.name}</span>`;
-            fi.addEventListener('click', () => openFile(node.path));
-            fi.addEventListener('contextmenu', (e: MouseEvent) => {
-                e.preventDefault();
-                showContextMenu(e.clientX, e.clientY, [
-                    { label: 'Open', action: () => openFile(node.path) },
-                    { label: '─', action: () => {} },
-                    { label: 'Rename...', action: () => renameFile(node.path) },
-                    { label: 'Delete', action: () => deleteFile(node.path) },
-                    { label: '─', action: () => {} },
-                    { label: 'Copy Path', action: () => { navigator.clipboard.writeText(node.path); } },
-                    { label: 'Reveal in Explorer', action: () => { shell.showItemInFolder(node.path); } },
-                ]);
-            });
-
-            // --- Drag-and-drop: files are draggable ---
-            fi.draggable = true;
-            fi.addEventListener('dragstart', (e: DragEvent) => {
-                e.dataTransfer!.setData('nexia/filepath', node.path);
-                e.dataTransfer!.setData('nexia/isdir', 'false');
-                e.dataTransfer!.effectAllowed = 'move';
-                fi.classList.add('dragging');
-            });
-            fi.addEventListener('dragend', () => { fi.classList.remove('dragging'); });
-
-            item.appendChild(fi);
-        }
-        container.appendChild(item);
-    }
-}
-
-/**
- * Move a file or folder to a new path, updating any open tabs.
- */
-async function moveFile(srcPath: string, destPath: string) {
-    const name = nodePath.basename(srcPath);
-    if (nodeFs.existsSync(destPath)) {
-        if (!confirm(`"${name}" already exists in the destination. Overwrite?`)) return;
-    }
-    try {
-        await ipcRenderer.invoke(IPC.FILE_RENAME, srcPath, destPath);
-        // Update any open tabs that were inside the moved path
-        for (const tab of openTabs) {
-            if (tab.path === srcPath) {
-                tab.path = destPath;
-                tab.name = nodePath.basename(destPath);
-                if (activeTab === srcPath) activeTab = destPath;
-            } else if (tab.path.startsWith(srcPath + nodePath.sep)) {
-                // File was inside a moved folder
-                const rel = tab.path.substring(srcPath.length);
-                tab.path = destPath + rel;
-                if (activeTab === srcPath + rel) activeTab = tab.path;
-            }
-        }
-        renderTabs();
-        await refreshFileTree();
-        appendOutput(`Moved: ${name} → ${nodePath.dirname(destPath)}\n`);
-    } catch (err: any) {
-        appendOutput(`Move failed: ${err.message}\n`);
-    }
-}
-
-function getFileIcon(ext: string): string {
-    const m: Record<string, string> = {
-        '.cpp': '<span class="ficon ficon-cpp">C++</span>',
-        '.c': '<span class="ficon ficon-c">C</span>',
-        '.h': '<span class="ficon ficon-h">H</span>',
-        '.hpp': '<span class="ficon ficon-h">H+</span>',
-        '.hlsl': '🎨', '.fx': '🎨',
-        '.xui': '🖼', '.xur': '🖼',
-        '.wav': '🔊', '.xma': '🔊',
-        '.json': '<span class="ficon ficon-json">{}</span>',
-        '.xml': '<span class="ficon ficon-xml">&lt;&gt;</span>',
-        '.xex': '🎮', '.exe': '⚙', '.dll': '📦',
-        '.png': '🖼', '.dds': '🖼', '.bmp': '🖼', '.tga': '🖼',
-        '.txt': '📝', '.md': '📝', '.log': '📝',
-        '.bat': '⚡', '.cmd': '⚡',
-        '.py': '🐍', '.js': '<span class="ficon ficon-js">JS</span>',
-        '.ts': '<span class="ficon ficon-ts">TS</span>',
-    };
-    return m[ext] || '📄';
-}
+const { refreshFileTree, inlineCreateItem, getFileIcon } = _fileTreeMod;
 
 // ══════════════════════════════════════
 //  OUTPUT
@@ -1513,9 +1211,8 @@ function appendOutput(text: string) {
     const lines = text.split('\n');
     for (let i = 0; i < lines.length; i++) {
         const line = lines[i];
-        // Don't add trailing newline for last empty split segment
+        // Skip trailing empty segment from split (e.g. "hello\n".split('\n') → ["hello", ""])
         if (i === lines.length - 1 && line === '') {
-            el.appendChild(document.createTextNode('\n'));
             continue;
         }
 
@@ -1563,44 +1260,10 @@ function appendOutput(text: string) {
 function clearOutput() { $('output-text').innerHTML = ''; }
 
 // ══════════════════════════════════════
-//  CONTEXT MENU
+//  CONTEXT MENU — Extracted to ui/contextMenu.ts
 // ══════════════════════════════════════
-interface CtxItem { label: string; action: () => void; }
-function showContextMenu(x: number, y: number, items: CtxItem[]) {
-    let menu = document.getElementById('context-menu');
-    if (!menu) {
-        menu = document.createElement('div');
-        menu.id = 'context-menu';
-        document.body.appendChild(menu);
-    }
-    menu.innerHTML = '';
-    for (const item of items) {
-        if (item.label === '─') {
-            const sep = document.createElement('div');
-            sep.className = 'ctx-separator';
-            menu.appendChild(sep);
-        } else {
-            const el = document.createElement('div');
-            el.className = 'ctx-item';
-            el.textContent = item.label;
-            el.addEventListener('click', () => { hideContextMenu(); item.action(); });
-            menu.appendChild(el);
-        }
-    }
-    // Position, keeping on screen
-    menu.style.display = 'block';
-    menu.style.left = Math.min(x, window.innerWidth - 200) + 'px';
-    menu.style.top = Math.min(y, window.innerHeight - items.length * 30) + 'px';
-}
-function hideContextMenu() {
-    const menu = document.getElementById('context-menu');
-    if (menu) menu.style.display = 'none';
-}
-document.addEventListener('click', hideContextMenu);
-document.addEventListener('contextmenu', (e) => {
-    // Only suppress default on our custom areas
-    if ((e.target as HTMLElement).closest('.tree-item, .editor-tab')) return;
-});
+const { showContextMenu, hideContextMenu, initContextMenu } = require('./ui/contextMenu');
+initContextMenu();
 
 // ══════════════════════════════════════
 //  FILE OPERATIONS (rename, delete, new in folder)
@@ -1712,6 +1375,10 @@ function hasUnsavedChanges(): boolean {
 }
 
 function confirmUnsavedAndClose() {
+    // Save learning progress before closing
+    learningProfile.endSession();
+    learningProfile.save();
+
     if (hasUnsavedChanges()) {
         const choice = confirm('You have unsaved changes. Save all before closing?');
         if (choice) {
@@ -1842,13 +1509,37 @@ async function openProject(dir?: string) {
     currentProject = project;
     $('titlebar-project').textContent = `— ${project.name}`;
     await refreshFileTree();
-    if (project.sourceFiles?.length > 0) {
+
+    // Try to restore previous session tabs for this project
+    const session = loadSession();
+    if (session.lastProjectPath === project.path && session.openFiles?.length) {
+        await restoreSession();
+    } else if (project.sourceFiles?.length > 0) {
+        // No session — open main.cpp as default
         const mainFile = project.sourceFiles.find((f: string) => /main\.(cpp|c)$/i.test(f))
                       || project.sourceFiles[project.sourceFiles.length - 1];
         const f = nodePath.isAbsolute(mainFile) ? mainFile : nodePath.join(project.path, mainFile);
         openFile(f);
     }
     $('welcome-screen').style.display = 'none';
+    saveSession();
+}
+
+function closeCurrentProject() {
+    if (!currentProject) return;
+    // Save session before closing
+    saveSession();
+    // Close all open tabs
+    closeAllTabs();
+    // Clear project state
+    const projectName = currentProject.name;
+    currentProject = null as any;
+    $('titlebar-project').textContent = '';
+    // Clear the file tree
+    $('file-tree').innerHTML = '';
+    // Show welcome screen
+    $('welcome-screen').style.display = '';
+    appendOutput(`Closed project: ${projectName}\n`);
 }
 
 $('welcome-open').addEventListener('click', () => openProject());
@@ -1953,7 +1644,7 @@ $('nf-create').addEventListener('click', createNewFile);
 // ══════════════════════════════════════
 //  DEPLOY
 // ══════════════════════════════════════
-$('btn-deploy').addEventListener('click', async () => {
+async function doDeploy() {
     if (!currentProject) { appendOutput('No project open.\n'); return; }
     const config = ($('config-select') as HTMLSelectElement).value;
     const xexPath = nodePath.join(currentProject.path, 'out', config, currentProject.name + '.xex');
@@ -1963,7 +1654,7 @@ $('btn-deploy').addEventListener('click', async () => {
         onDeploy();
     }
     catch (err: any) { appendOutput(`Deploy failed: ${err.message}\n`); }
-});
+}
 
 // ══════════════════════════════════════
 //  SDK TOOLS DIALOG
@@ -2018,103 +1709,30 @@ $('tools-close').addEventListener('click', () => $('tools-overlay').classList.ad
 
 async function renderExtensionsPanel() {
     const panel = $('extensions-panel');
-    const extensions = await ipcRenderer.invoke(IPC.EXT_LIST);
-    const typeIcons: Record<string, string> = {
-        tool: '🔧', template: '📋', snippet: '✂', theme: '🎨',
-        library: '📚', plugin: '🔌',
-    };
-
-    let html = `
-        <div style="padding:8px 12px;">
-            <div style="display:flex;gap:6px;margin-bottom:12px;">
-                <button class="devkit-btn" id="ext-import-btn" style="flex:1;">📦 Import</button>
-                <button class="devkit-btn" id="ext-open-dir-btn" title="Open extensions folder">📁</button>
-            </div>
-    `;
-
-    if (extensions.length === 0) {
-        html += `
-            <div style="text-align:center;padding:24px 12px;color:var(--text-dim);">
-                <div style="font-size:32px;margin-bottom:12px;">🧩</div>
-                <div style="margin-bottom:8px;">No extensions installed</div>
-                <div style="font-size:12px;">Click <strong>Import</strong> to add extensions<br>from .zip files or folders.</div>
-            </div>
-        `;
-    } else {
-        for (const ext of extensions) {
-            const m = ext.manifest;
-            const icon = m.icon || typeIcons[m.type] || '📦';
-            const badge = m.type.charAt(0).toUpperCase() + m.type.slice(1);
-            const enabledClass = ext.enabled ? '' : ' style="opacity:0.5;"';
-            html += `
-                <div class="ext-card" data-ext-id="${m.id}"${enabledClass}>
-                    <div style="display:flex;align-items:flex-start;gap:10px;">
-                        <span style="font-size:24px;">${icon}</span>
-                        <div style="flex:1;min-width:0;">
-                            <div style="display:flex;align-items:center;gap:6px;">
-                                <span style="font-weight:600;color:var(--text);">${m.name}</span>
-                                <span class="tool-type-badge">${badge}</span>
-                            </div>
-                            <div style="font-size:11px;color:var(--text-dim);margin-top:2px;">
-                                v${m.version}${m.author ? ' · ' + m.author : ''}
-                            </div>
-                            <div style="font-size:12px;color:var(--text-dim);margin-top:4px;">
-                                ${m.description || ''}
-                            </div>
-                        </div>
-                    </div>
-                    <div style="display:flex;gap:4px;margin-top:8px;justify-content:flex-end;">
-                        <button class="ext-toggle-btn devkit-btn" data-ext-id="${m.id}" data-enabled="${ext.enabled}" class="btn-sm">
-                            ${ext.enabled ? '⏸ Disable' : '▶ Enable'}
-                        </button>
-                        <button class="ext-remove-btn devkit-btn" data-ext-id="${m.id}" class="btn-sm btn-danger">
-                            🗑
-                        </button>
-                    </div>
+    panel.innerHTML = `
+        <div style="text-align:center;padding:32px 16px;">
+            <div style="font-size:40px;margin-bottom:14px;">🏪</div>
+            <div style="font-size:15px;font-weight:600;color:var(--text);margin-bottom:6px;">Nexia Marketplace</div>
+            <div style="font-size:12px;color:var(--text-dim);line-height:1.6;margin-bottom:20px;">Browse and install extensions, themes, and lesson packages for the Nexia IDE.</div>
+            <div style="display:flex;flex-direction:column;gap:10px;max-width:220px;margin:0 auto;">
+                <div style="padding:12px;background:var(--bg-input);border:1px solid var(--border);border-radius:8px;text-align:center;">
+                    <div style="font-size:22px;margin-bottom:6px;">🧩</div>
+                    <div style="font-size:13px;font-weight:600;color:var(--text);">Extensions</div>
+                    <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">Coming Soon</div>
                 </div>
-            `;
-        }
-    }
-
-    html += `</div>`;
-    panel.innerHTML = html;
-
-    // Wire up buttons
-    const importBtn = $('ext-import-btn');
-    if (importBtn) {
-        importBtn.addEventListener('click', () => {
-            $('ext-import-overlay').classList.remove('hidden');
-        });
-    }
-
-    const openDirBtn = $('ext-open-dir-btn');
-    if (openDirBtn) {
-        openDirBtn.addEventListener('click', () => {
-            ipcRenderer.invoke(IPC.EXT_OPEN_DIR);
-        });
-    }
-
-    // Toggle buttons
-    panel.querySelectorAll('.ext-toggle-btn').forEach((btn: Element) => {
-        btn.addEventListener('click', async () => {
-            const id = (btn as HTMLElement).dataset.extId!;
-            const currentlyEnabled = (btn as HTMLElement).dataset.enabled === 'true';
-            await ipcRenderer.invoke(IPC.EXT_SET_ENABLED, id, !currentlyEnabled);
-            renderExtensionsPanel();
-        });
-    });
-
-    // Remove buttons
-    panel.querySelectorAll('.ext-remove-btn').forEach((btn: Element) => {
-        btn.addEventListener('click', async () => {
-            const id = (btn as HTMLElement).dataset.extId!;
-            if (confirm(`Remove extension "${id}"? This cannot be undone.`)) {
-                await ipcRenderer.invoke(IPC.EXT_UNINSTALL, id);
-                appendOutput(`🗑 Extension removed: ${id}\n`);
-                renderExtensionsPanel();
-            }
-        });
-    });
+                <div style="padding:12px;background:var(--bg-input);border:1px solid var(--border);border-radius:8px;text-align:center;">
+                    <div style="font-size:22px;margin-bottom:6px;">🎨</div>
+                    <div style="font-size:13px;font-weight:600;color:var(--text);">Themes</div>
+                    <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">Coming Soon</div>
+                </div>
+                <div style="padding:12px;background:var(--bg-input);border:1px solid var(--border);border-radius:8px;text-align:center;">
+                    <div style="font-size:22px;margin-bottom:6px;">🎬</div>
+                    <div style="font-size:13px;font-weight:600;color:var(--text);">Lesson Packages</div>
+                    <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">Coming Soon</div>
+                </div>
+            </div>
+        </div>
+    `;
 }
 
 // Import overlay buttons
@@ -2170,745 +1788,29 @@ $('ext-create-submit').addEventListener('click', async () => {
     }
 });
 
-// Toolbar button opens extensions panel in sidebar
-$('btn-extensions').addEventListener('click', () => {
-    const tab = document.querySelector('.sidebar-tab[data-panel="extensions"]') as HTMLElement;
-    if (tab) tab.click();
-});
+// ══════════════════════════════════════
+//  DEVKIT PANEL — Extracted to panels/devkitPanel.ts
+// ══════════════════════════════════════
+let _devkitPanel: any;
+try {
+    _devkitPanel = require('./panels/devkitPanel');
+} catch (err: any) {
+    console.error('[Devkit] Module load failed:', err.message);
+    _devkitPanel = { initDevkit: () => {}, initDevkitPanel: () => {}, isDevkitConnected: () => false };
+}
+const { initDevkitPanel, isDevkitConnected } = _devkitPanel;
 
 // ══════════════════════════════════════
-//  DEVKIT PANEL
+//  EMULATOR PANEL — Extracted to panels/emulatorPanel.ts
 // ══════════════════════════════════════
-let devkitConnected = false;
-let devkitCurrentIp = '';
-
-function initDevkitPanel() {
-    $('devkit-panel').innerHTML = `
-        <div class="devkit-section">
-            <h4>CONSOLE</h4>
-            <div class="devkit-status" id="devkit-status">
-                <span class="devkit-status-dot disconnected"></span>
-                <span id="devkit-status-text">Not connected</span>
-            </div>
-            <div class="devkit-input-row">
-                <input type="text" id="devkit-ip" placeholder="192.168.1.100" value="">
-                <button class="devkit-btn devkit-connect-btn" id="devkit-connect-btn">Connect</button>
-            </div>
-            <div class="devkit-info hidden" id="devkit-info"></div>
-            <div class="devkit-actions" id="devkit-actions" style="display:none;">
-                <button class="devkit-btn" id="devkit-reboot-btn">🔄 Reboot Console</button>
-                <button class="devkit-btn" id="devkit-screenshot-btn">📷 Capture Screenshot</button>
-                <button class="devkit-btn" id="devkit-files-btn">📁 Browse Files</button>
-                <button class="devkit-btn" id="devkit-sysinfo-btn">ℹ System Info</button>
-            </div>
-        </div>
-        <div class="devkit-section hidden" id="devkit-file-browser">
-            <h4>FILE BROWSER</h4>
-            <div class="devkit-path-row">
-                <button class="devkit-btn devkit-path-up" id="devkit-path-up">↑</button>
-                <input type="text" id="devkit-path" placeholder="HDD:\\" value="">
-                <button class="devkit-btn" id="devkit-path-go">Go</button>
-            </div>
-            <div id="devkit-file-list" class="devkit-file-list"></div>
-        </div>`;
-
-    // Check if already connected
-    ipcRenderer.invoke(IPC.DEVKIT_STATUS).then((status: any) => {
-        if (status.connected) {
-            devkitConnected = true;
-            devkitCurrentIp = status.ip;
-            ($('devkit-ip') as HTMLInputElement).value = status.ip;
-            updateDevkitUI(true, status.ip);
-        }
-    });
-
-    // Connect / Disconnect
-    $('devkit-connect-btn')!.addEventListener('click', async () => {
-        const btn = $('devkit-connect-btn') as HTMLButtonElement;
-        const ip = ($('devkit-ip') as HTMLInputElement).value.trim();
-
-        if (devkitConnected) {
-            // Disconnect
-            await ipcRenderer.invoke(IPC.DEVKIT_DISCONNECT);
-            devkitConnected = false;
-            devkitCurrentIp = '';
-            updateDevkitUI(false);
-            appendOutput('Disconnected from console.\n');
-            return;
-        }
-
-        if (!ip) { appendOutput('Enter console IP address.\n'); return; }
-
-        btn.textContent = 'Connecting...';
-        btn.disabled = true;
-        ($('devkit-status-text') as HTMLElement).textContent = `Connecting to ${ip}...`;
-
-        try {
-            const result = await ipcRenderer.invoke(IPC.DEVKIT_CONNECT, ip);
-            if (result.connected) {
-                devkitConnected = true;
-                devkitCurrentIp = ip;
-                updateDevkitUI(true, ip, result.type);
-            } else {
-                updateDevkitUI(false);
-                appendOutput(`Connection failed: ${result.type || 'Unknown error'}\n`);
-            }
-        } catch (e: any) {
-            updateDevkitUI(false);
-            appendOutput(`Connection error: ${e.message}\n`);
-        }
-
-        btn.disabled = false;
-    });
-
-    // Reboot
-    $('devkit-reboot-btn')?.addEventListener('click', async () => {
-        if (!devkitConnected) { appendOutput('Not connected.\n'); return; }
-        try {
-            appendOutput('Sending reboot command...\n');
-            await ipcRenderer.invoke(IPC.DEVKIT_REBOOT, 'cold', devkitCurrentIp);
-            devkitConnected = false;
-            updateDevkitUI(false);
-            appendOutput('Reboot sent. Console will reconnect when ready.\n');
-        } catch (e: any) { appendOutput(`Reboot failed: ${e.message}\n`); }
-    });
-
-    // Screenshot
-    $('devkit-screenshot-btn')?.addEventListener('click', async () => {
-        if (!devkitConnected) { appendOutput('Not connected.\n'); return; }
-        const p = nodePath.join(nodeOs.homedir(), 'Desktop', `screenshot_${Date.now()}.bmp`);
-        try {
-            appendOutput('Capturing screenshot...\n');
-            await ipcRenderer.invoke(IPC.DEVKIT_SCREENSHOT, p, devkitCurrentIp);
-            appendOutput(`Screenshot saved: ${p}\n`);
-        } catch (e: any) { appendOutput(`Screenshot failed: ${e.message}\n`); }
-    });
-
-    // System Info
-    $('devkit-sysinfo-btn')?.addEventListener('click', async () => {
-        if (!devkitConnected) { appendOutput('Not connected.\n'); return; }
-        try {
-            appendOutput('Fetching system info...\n');
-            const info = await ipcRenderer.invoke(IPC.DEVKIT_SYSINFO, devkitCurrentIp);
-            const infoEl = $('devkit-info');
-            if (infoEl && info) {
-                let html = '<div class="devkit-info-grid">';
-                for (const [key, val] of Object.entries(info)) {
-                    html += `<span class="devkit-info-key">${escapeHtml(key)}</span><span class="devkit-info-val">${escapeHtml(String(val))}</span>`;
-                }
-                html += '</div>';
-                infoEl.innerHTML = html;
-                infoEl.classList.remove('hidden');
-                appendOutput('System info loaded.\n');
-            }
-        } catch (e: any) { appendOutput(`System info failed: ${e.message}\n`); }
-    });
-
-    // Browse Files
-    $('devkit-files-btn')?.addEventListener('click', () => {
-        if (!devkitConnected) { appendOutput('Not connected.\n'); return; }
-        $('devkit-file-browser')?.classList.remove('hidden');
-        showDevkitVolumes();
-    });
-
-    $('devkit-path-go')?.addEventListener('click', () => {
-        const p = ($('devkit-path') as HTMLInputElement).value.trim();
-        if (p) browseDevkitPath(p);
-    });
-
-    $('devkit-path-up')?.addEventListener('click', () => {
-        const current = ($('devkit-path') as HTMLInputElement).value.trim();
-        // If we're at a volume root like "HDD:\" or "HDD:", go back to volume list
-        if (current.match(/^[A-Za-z0-9]+:[\\/]?$/) || !current.includes('\\')) {
-            showDevkitVolumes();
-            return;
-        }
-        const parts = current.replace(/\\/g, '/').split('/').filter(Boolean);
-        if (parts.length > 1) {
-            parts.pop();
-            browseDevkitPath(parts.join('\\') + '\\');
-        } else {
-            showDevkitVolumes();
-        }
-    });
-
-    ($('devkit-path') as HTMLInputElement)?.addEventListener('keydown', (e: KeyboardEvent) => {
-        if (e.key === 'Enter') {
-            const p = ($('devkit-path') as HTMLInputElement).value.trim();
-            if (p) browseDevkitPath(p);
-        }
-    });
+let _emulatorPanel: any;
+try {
+    _emulatorPanel = require('./panels/emulatorPanel');
+} catch (err: any) {
+    console.error('[Emulator] Module load failed:', err.message);
+    _emulatorPanel = { initEmulator: () => {}, initEmulatorPanel: () => {} };
 }
-
-function updateDevkitUI(connected: boolean, ip?: string, consoleName?: string) {
-    const dot = document.querySelector('.devkit-status-dot') as HTMLElement;
-    const text = $('devkit-status-text') as HTMLElement;
-    const btn = $('devkit-connect-btn') as HTMLButtonElement;
-    const actions = $('devkit-actions') as HTMLElement;
-
-    if (connected) {
-        dot.className = 'devkit-status-dot connected';
-        text.textContent = consoleName ? `${consoleName} (${ip})` : `Connected to ${ip}`;
-        btn.textContent = 'Disconnect';
-        btn.classList.add('disconnect');
-        actions.style.display = '';
-    } else {
-        dot.className = 'devkit-status-dot disconnected';
-        text.textContent = 'Not connected';
-        btn.textContent = 'Connect';
-        btn.classList.remove('disconnect');
-        actions.style.display = 'none';
-        $('devkit-info')?.classList.add('hidden');
-        $('devkit-file-browser')?.classList.add('hidden');
-    }
-}
-
-const XBOX_VOLUME_INFO: Record<string, { label: string; icon: string }> = {
-    'HDD:': { label: 'Retail Hard Drive Emulation', icon: '💾' },
-    'GAME:': { label: 'Active Title Media', icon: '🎮' },
-    'D:': { label: 'Active Title Media', icon: '🎮' },
-    'DVD:': { label: 'Volume', icon: '💿' },
-    'CdRom0:': { label: 'Volume', icon: '💿' },
-    'USB0:': { label: 'Volume', icon: '🔌' },
-    'USB1:': { label: 'Volume', icon: '🔌' },
-    'INTUSB:': { label: 'Volume', icon: '🔌' },
-    'DASHUSER:': { label: 'Volume', icon: '📁' },
-    'SysCache0:': { label: 'Volume', icon: '📁' },
-    'SysCache1:': { label: 'Volume', icon: '📁' },
-    'media:': { label: 'Volume', icon: '🎵' },
-    'DEVKIT:': { label: 'Development Area', icon: '🛠' },
-    'FLASH:': { label: 'NAND Flash', icon: '📁' },
-};
-
-async function showDevkitVolumes() {
-    const listEl = $('devkit-file-list') as HTMLElement;
-    const pathInput = $('devkit-path') as HTMLInputElement;
-    if (!listEl) return;
-
-    pathInput.value = '';
-    listEl.innerHTML = '<div class="community-feed-loading">Querying volumes...</div>';
-
-    let volumes: string[];
-    try {
-        volumes = await ipcRenderer.invoke(IPC.DEVKIT_VOLUMES, devkitCurrentIp);
-    } catch {
-        // Fallback to common volumes
-        volumes = ['HDD:', 'GAME:', 'DVD:', 'USB0:', 'DASHUSER:'];
-    }
-
-    listEl.innerHTML = '';
-
-    for (const vol of volumes) {
-        const info = XBOX_VOLUME_INFO[vol] || { label: 'Volume', icon: '💾' };
-        const entry = document.createElement('div');
-        entry.className = 'devkit-file-entry dir';
-        entry.innerHTML = `<span class="devkit-file-icon">${info.icon}</span><span class="devkit-file-name">${escapeHtml(vol)}</span><span class="devkit-file-size">${escapeHtml(info.label)}</span>`;
-        entry.addEventListener('click', () => {
-            browseDevkitPath(vol + '\\');
-        });
-        listEl.appendChild(entry);
-    }
-
-    if (volumes.length === 0) {
-        listEl.innerHTML = '<div class="community-feed-placeholder"><p>No volumes found.</p></div>';
-    }
-}
-
-async function browseDevkitPath(remotePath: string) {
-    const listEl = $('devkit-file-list') as HTMLElement;
-    const pathInput = $('devkit-path') as HTMLInputElement;
-    if (!listEl) return;
-
-    pathInput.value = remotePath;
-    listEl.innerHTML = '<div class="community-feed-loading">Loading...</div>';
-
-    try {
-        const output = await ipcRenderer.invoke(IPC.DEVKIT_FILE_MANAGER, remotePath, devkitCurrentIp);
-        listEl.innerHTML = '';
-
-        if (!output || output.trim() === '') {
-            listEl.innerHTML = '<div class="community-feed-placeholder"><p>Empty directory or no access.</p></div>';
-            return;
-        }
-
-        // Parse xbdir output — lines like:
-        // 12/25/2024  04:30 PM    <DIR>          Games
-        // 12/25/2024  04:30 PM           123,456  default.xex
-        const lines = output.split('\n').filter((l: string) => l.trim());
-        for (const line of lines) {
-            const dirMatch = line.match(/<DIR>\s+(.+)/);
-            const fileMatch = line.match(/(\d[\d,]+)\s+(.+)/);
-
-            if (dirMatch) {
-                const name = dirMatch[1].trim();
-                const entry = document.createElement('div');
-                entry.className = 'devkit-file-entry dir';
-                entry.innerHTML = `<span class="devkit-file-icon">📁</span><span class="devkit-file-name">${escapeHtml(name)}</span>`;
-                entry.addEventListener('click', () => {
-                    const sep = remotePath.endsWith('\\') || remotePath.endsWith(':') ? '' : '\\';
-                    browseDevkitPath(remotePath + sep + name + '\\');
-                });
-                listEl.appendChild(entry);
-            } else if (fileMatch) {
-                const size = fileMatch[1].trim();
-                const name = fileMatch[2].trim();
-                if (!name || name === '.' || name === '..') continue;
-                const entry = document.createElement('div');
-                const isXex = name.toLowerCase().endsWith('.xex');
-                const isXbe = name.toLowerCase().endsWith('.xbe');
-                entry.className = 'devkit-file-entry file' + (isXex || isXbe ? ' executable' : '');
-                const icon = isXex ? '🎮' : isXbe ? '🎮' : '📄';
-                entry.innerHTML = `<span class="devkit-file-icon">${icon}</span><span class="devkit-file-name">${escapeHtml(name)}</span>${isXex || isXbe ? '<span class="devkit-file-run">▶ Run</span>' : ''}<span class="devkit-file-size">${size}</span>`;
-
-                if (isXex || isXbe) {
-                    // Double-click to launch
-                    entry.addEventListener('dblclick', async () => {
-                        const sep = remotePath.endsWith('\\') ? '' : '\\';
-                        const fullPath = remotePath + sep + name;
-                        entry.classList.add('launching');
-                        const runLabel = entry.querySelector('.devkit-file-run') as HTMLElement;
-                        if (runLabel) runLabel.textContent = '⏳ Launching...';
-                        try {
-                            await ipcRenderer.invoke(IPC.DEVKIT_LAUNCH, fullPath, devkitCurrentIp);
-                            if (runLabel) runLabel.textContent = '✓ Launched';
-                            appendOutput(`Launched: ${fullPath}\n`);
-                        } catch (e: any) {
-                            if (runLabel) runLabel.textContent = '▶ Run';
-                            appendOutput(`Launch failed: ${e.message}\n`);
-                        }
-                        entry.classList.remove('launching');
-                    });
-                    // Single click on Run button
-                    entry.querySelector('.devkit-file-run')?.addEventListener('click', async (e: Event) => {
-                        e.stopPropagation();
-                        const sep = remotePath.endsWith('\\') ? '' : '\\';
-                        const fullPath = remotePath + sep + name;
-                        const runLabel = entry.querySelector('.devkit-file-run') as HTMLElement;
-                        if (runLabel) runLabel.textContent = '⏳ Launching...';
-                        try {
-                            await ipcRenderer.invoke(IPC.DEVKIT_LAUNCH, fullPath, devkitCurrentIp);
-                            if (runLabel) runLabel.textContent = '✓ Launched';
-                            appendOutput(`Launched: ${fullPath}\n`);
-                        } catch (e: any) {
-                            if (runLabel) runLabel.textContent = '▶ Run';
-                            appendOutput(`Launch failed: ${(e as Error).message}\n`);
-                        }
-                    });
-                }
-                listEl.appendChild(entry);
-            }
-        }
-
-        if (listEl.children.length === 0) {
-            listEl.innerHTML = '<div class="community-feed-placeholder"><p>No entries found.</p></div>';
-        }
-    } catch (e: any) {
-        listEl.innerHTML = `<div class="community-feed-placeholder"><p>Error: ${escapeHtml(e.message)}</p></div>`;
-    }
-}
-
-// ══════════════════════════════════════
-//  EMULATOR PANEL (Nexia 360)
-// ══════════════════════════════════════
-let emuState: 'stopped' | 'starting' | 'running' | 'paused' = 'stopped';
-
-function initEmulatorPanel() {
-    const panel = $('emulator-panel');
-    if (!panel) return;
-
-    panel.innerHTML = `
-        <div class="emu-section">
-            <h4>NEXIA 360 EMULATOR</h4>
-            <div class="emu-status" id="emu-status">
-                <span class="emu-status-dot stopped" id="emu-dot"></span>
-                <span id="emu-status-text">Stopped</span>
-            </div>
-
-            <!-- Config -->
-            <div class="emu-config" id="emu-config">
-                <div class="devkit-input-row">
-                    <input type="text" id="emu-path" placeholder="Path to Nexia360.exe">
-                    <button class="devkit-btn" id="emu-browse-btn">...</button>
-                </div>
-                <button class="devkit-btn emu-btn-primary" id="emu-save-path" style="width:100%;margin-bottom:8px;">Save Path</button>
-            </div>
-
-            <!-- Launch -->
-            <div class="emu-launch-row" id="emu-launch-row">
-                <div class="devkit-input-row">
-                    <input type="text" id="emu-xex-path" placeholder="XEX file to run...">
-                    <button class="devkit-btn" id="emu-xex-browse">...</button>
-                </div>
-                <button class="emu-launch-btn" id="emu-launch-btn">▶ Launch in Emulator</button>
-            </div>
-
-            <!-- Controls (visible when running) -->
-            <div class="emu-controls hidden" id="emu-controls">
-                <div class="emu-control-bar">
-                    <button class="emu-ctrl-btn" id="emu-pause-btn" title="Pause">⏸</button>
-                    <button class="emu-ctrl-btn" id="emu-resume-btn" title="Resume">▶</button>
-                    <button class="emu-ctrl-btn" id="emu-step-btn" title="Step">→</button>
-                    <button class="emu-ctrl-btn" id="emu-step-over-btn" title="Step Over">↷</button>
-                    <button class="emu-ctrl-btn emu-stop-btn" id="emu-stop-btn" title="Stop">⏹</button>
-                </div>
-            </div>
-        </div>
-
-        <!-- Breakpoints -->
-        <div class="emu-section hidden" id="emu-bp-section">
-            <h4>BREAKPOINTS</h4>
-            <div class="devkit-input-row">
-                <input type="text" id="emu-bp-addr" placeholder="0x82000000 or function name">
-                <button class="devkit-btn" id="emu-bp-add">+ Add</button>
-            </div>
-            <div id="emu-bp-list" class="emu-bp-list"></div>
-        </div>
-
-        <!-- Call Stack -->
-        <div class="emu-section hidden" id="emu-stack-section">
-            <h4>CALL STACK</h4>
-            <button class="devkit-btn" id="emu-stack-refresh" style="width:100%;margin-bottom:6px;">Refresh</button>
-            <div id="emu-stack-list" class="emu-stack-list"></div>
-        </div>
-
-        <!-- Registers -->
-        <div class="emu-section hidden" id="emu-reg-section">
-            <h4>REGISTERS</h4>
-            <button class="devkit-btn" id="emu-reg-refresh" style="width:100%;margin-bottom:6px;">Refresh Registers</button>
-            <div id="emu-reg-grid" class="emu-reg-grid"></div>
-        </div>
-
-        <!-- Memory Inspector -->
-        <div class="emu-section hidden" id="emu-mem-section">
-            <h4>MEMORY</h4>
-            <div class="devkit-input-row">
-                <input type="text" id="emu-mem-addr" placeholder="0x82000000">
-                <input type="number" id="emu-mem-size" value="256" style="width:60px;" min="16" max="4096" step="16">
-                <button class="devkit-btn" id="emu-mem-read">Read</button>
-            </div>
-            <div id="emu-mem-dump" class="emu-mem-dump"></div>
-        </div>`;
-
-    // Load saved config
-    ipcRenderer.invoke(IPC.EMU_GET_CONFIG).then((cfg: any) => {
-        if (cfg.path) ($('emu-path') as HTMLInputElement).value = cfg.path;
-    });
-
-    // Browse for Nexia360.exe
-    $('emu-browse-btn')?.addEventListener('click', async () => {
-        const file = await ipcRenderer.invoke(IPC.FILE_SELECT_FILE, [{ name: 'Executable', extensions: ['exe'] }]);
-        if (file) ($('emu-path') as HTMLInputElement).value = file;
-    });
-
-    // Save path
-    $('emu-save-path')?.addEventListener('click', async () => {
-        const p = ($('emu-path') as HTMLInputElement).value.trim();
-        if (!p) { appendOutput('Enter path to Nexia360.exe\n'); return; }
-        const result = await ipcRenderer.invoke(IPC.EMU_CONFIGURE, p);
-        if (result.configured) {
-            appendOutput('[Nexia 360] Emulator path saved.\n');
-        } else {
-            appendOutput('[Nexia 360] File not found at: ' + p + '\n');
-        }
-    });
-
-    // Browse for XEX
-    $('emu-xex-browse')?.addEventListener('click', async () => {
-        const file = await ipcRenderer.invoke(IPC.FILE_SELECT_FILE, [{ name: 'Xbox Executable', extensions: ['xex'] }]);
-        if (file) ($('emu-xex-path') as HTMLInputElement).value = file;
-    });
-
-    // Launch
-    $('emu-launch-btn')?.addEventListener('click', async () => {
-        const xex = ($('emu-xex-path') as HTMLInputElement).value.trim();
-        if (!xex) { appendOutput('Select a XEX file to run.\n'); return; }
-        const btn = $('emu-launch-btn') as HTMLButtonElement;
-        btn.textContent = '⏳ Starting...';
-        btn.disabled = true;
-        const result = await ipcRenderer.invoke(IPC.EMU_LAUNCH, xex);
-        if (result.success) {
-            // Directly update UI — don't wait for events
-            emuState = 'running';
-            updateEmulatorUI();
-        } else {
-            appendOutput('[Nexia 360] ' + (result.error || 'Launch failed') + '\n');
-            btn.textContent = '▶ Launch in Emulator';
-            btn.disabled = false;
-        }
-    });
-
-    // Controls — fetch debug data directly from the return values
-    $('emu-pause-btn')?.addEventListener('click', async () => {
-        const result = await ipcRenderer.invoke(IPC.EMU_PAUSE);
-        if (result && result.paused) {
-            emuState = 'paused';
-            updateEmulatorUI();
-            if (result.registers) updateRegisters(result.registers);
-            if (result.backtrace) renderBacktrace(result.backtrace);
-        }
-    });
-    $('emu-resume-btn')?.addEventListener('click', async () => {
-        await ipcRenderer.invoke(IPC.EMU_RESUME);
-        emuState = 'running';
-        updateEmulatorUI();
-    });
-    $('emu-step-btn')?.addEventListener('click', async () => {
-        const result = await ipcRenderer.invoke(IPC.EMU_STEP);
-        if (result) {
-            emuState = 'paused';
-            updateEmulatorUI();
-            if (result.registers) updateRegisters(result.registers);
-            if (result.backtrace) renderBacktrace(result.backtrace);
-        }
-    });
-    $('emu-step-over-btn')?.addEventListener('click', async () => {
-        const result = await ipcRenderer.invoke(IPC.EMU_STEP_OVER);
-        if (result) {
-            emuState = 'paused';
-            updateEmulatorUI();
-            if (result.registers) updateRegisters(result.registers);
-            if (result.backtrace) renderBacktrace(result.backtrace);
-        }
-    });
-    $('emu-stop-btn')?.addEventListener('click', async () => {
-        await ipcRenderer.invoke(IPC.EMU_STOP);
-        emuState = 'stopped';
-        updateEmulatorUI();
-    });
-
-    // Breakpoints
-    $('emu-bp-add')?.addEventListener('click', () => {
-        const addr = ($('emu-bp-addr') as HTMLInputElement).value.trim();
-        if (!addr) return;
-        ipcRenderer.invoke(IPC.EMU_BREAKPOINT_SET, addr);
-        ($('emu-bp-addr') as HTMLInputElement).value = '';
-        setTimeout(() => refreshBreakpointList(), 500);
-    });
-    ($('emu-bp-addr') as HTMLInputElement)?.addEventListener('keydown', (e: KeyboardEvent) => {
-        if (e.key === 'Enter') $('emu-bp-add')?.click();
-    });
-
-    // Call Stack
-    $('emu-stack-refresh')?.addEventListener('click', () => fetchDebugState());
-
-    // Registers
-    $('emu-reg-refresh')?.addEventListener('click', () => ipcRenderer.invoke(IPC.EMU_REGISTERS));
-
-    // Memory read
-    $('emu-mem-read')?.addEventListener('click', () => {
-        const addr = ($('emu-mem-addr') as HTMLInputElement).value.trim();
-        const size = parseInt(($('emu-mem-size') as HTMLInputElement).value) || 256;
-        if (!addr) return;
-        ipcRenderer.invoke(IPC.EMU_MEMORY_READ, addr, size);
-    });
-
-    // Listen for emulator events from main process
-    ipcRenderer.on(IPC.EMU_EVENT, (_e: any, event: any) => {
-        handleEmulatorEvent(event);
-    });
-}
-
-function handleEmulatorEvent(event: any) {
-    switch (event.event) {
-        case 'state':
-            emuState = event.state;
-            updateEmulatorUI();
-            break;
-
-        case 'registers':
-            if (event.registers) updateRegisters(event.registers);
-            break;
-
-        case 'memory':
-            renderMemoryDump(event.addr, event.data);
-            break;
-
-        case 'breakpoints':
-            renderBreakpoints(event.list || []);
-            break;
-
-        case 'breakpoint_hit':
-            appendOutput(`[GDB] ● Breakpoint hit at ${event.addr}${event.func ? ' (' + event.func + ')' : ''}\n`);
-            break;
-
-        case 'backtrace':
-            renderBacktrace(event.frames || []);
-            break;
-
-        case 'paused':
-            emuState = 'paused';
-            updateEmulatorUI();
-            if (event.registers) updateRegisters(event.registers);
-            if (event.backtrace) renderBacktrace(event.backtrace);
-            break;
-
-        case 'resumed':
-            emuState = 'running';
-            updateEmulatorUI();
-            break;
-
-        case 'stopped':
-            emuState = 'stopped';
-            updateEmulatorUI();
-            break;
-
-        case 'gdb_console':
-            // GDB console output — show in output
-            if (event.text) appendOutput(event.text);
-            break;
-    }
-}
-
-/**
- * Fetch registers and backtrace from GDB — called when paused or after step.
- */
-async function fetchDebugState() {
-    try {
-        // Fetch registers (result comes back via EMU_EVENT)
-        const regs = await ipcRenderer.invoke(IPC.EMU_REGISTERS);
-        if (regs) updateRegisters(regs);
-
-        // Fetch backtrace
-        const bt = await ipcRenderer.invoke(IPC.EMU_BACKTRACE);
-        if (bt && bt.length > 0) renderBacktrace(bt);
-
-        // Fetch breakpoint list
-        const bps = await ipcRenderer.invoke(IPC.EMU_BREAKPOINT_LIST);
-        if (bps) renderBreakpoints(bps);
-    } catch (err: any) {
-        // GDB might not be attached
-    }
-}
-
-function updateEmulatorUI() {
-    const dot = $('emu-dot') as HTMLElement;
-    const text = $('emu-status-text') as HTMLElement;
-    const controls = $('emu-controls') as HTMLElement;
-    const launchBtn = $('emu-launch-btn') as HTMLButtonElement;
-    const bpSection = $('emu-bp-section') as HTMLElement;
-    const stackSection = $('emu-stack-section') as HTMLElement;
-    const regSection = $('emu-reg-section') as HTMLElement;
-    const memSection = $('emu-mem-section') as HTMLElement;
-
-    if (!dot) return;
-
-    const running = emuState === 'running' || emuState === 'paused';
-
-    dot.className = 'emu-status-dot ' + emuState;
-    const labels: Record<string, string> = {
-        stopped: 'Stopped', starting: 'Starting...', running: 'Running', paused: '⏸ Paused'
-    };
-    text.textContent = labels[emuState] || emuState;
-
-    controls.classList.toggle('hidden', emuState === 'stopped');
-    launchBtn.textContent = '▶ Launch in Emulator';
-    launchBtn.disabled = running;
-
-    const show = running ? 'remove' : 'add';
-    bpSection?.classList[show]('hidden');
-    stackSection?.classList[show]('hidden');
-    regSection?.classList[show]('hidden');
-    memSection?.classList[show]('hidden');
-
-    // Pause/Resume button states
-    const pauseBtn = $('emu-pause-btn') as HTMLButtonElement;
-    const resumeBtn = $('emu-resume-btn') as HTMLButtonElement;
-    if (pauseBtn) pauseBtn.disabled = emuState !== 'running';
-    if (resumeBtn) resumeBtn.disabled = emuState !== 'paused';
-}
-
-function updateRegisters(regs: any) {
-    const grid = $('emu-reg-grid');
-    if (!grid) return;
-
-    let html = '';
-    // Special registers
-    if (regs.pc) html += `<span class="emu-reg-name">PC</span><span class="emu-reg-val">${regs.pc}</span>`;
-    if (regs.lr) html += `<span class="emu-reg-name">LR</span><span class="emu-reg-val">${regs.lr}</span>`;
-    if (regs.ctr) html += `<span class="emu-reg-name">CTR</span><span class="emu-reg-val">${regs.ctr}</span>`;
-
-    // All registers from GDB
-    if (regs.gpr && regs.gpr.length > 0) {
-        html += '<span class="emu-reg-divider" style="grid-column:1/-1;border-top:1px solid var(--border);margin:4px 0;"></span>';
-        for (const reg of regs.gpr) {
-            if (!reg.name) continue;
-            html += `<span class="emu-reg-name">${escapeHtml(reg.name)}</span><span class="emu-reg-val">${escapeHtml(reg.value)}</span>`;
-        }
-    }
-
-    grid.innerHTML = html;
-}
-
-function renderMemoryDump(addr: string, hexData: string) {
-    const dump = $('emu-mem-dump');
-    if (!dump || !hexData) return;
-
-    const bytes = hexData.match(/.{1,2}/g) || [];
-    const startAddr = parseInt(addr, 16) || 0;
-    let html = '';
-
-    for (let i = 0; i < bytes.length; i += 16) {
-        const lineAddr = (startAddr + i).toString(16).toUpperCase().padStart(8, '0');
-        const hexPart = bytes.slice(i, i + 16).map(b => b.toUpperCase()).join(' ');
-        const asciiPart = bytes.slice(i, i + 16).map(b => {
-            const code = parseInt(b, 16);
-            return code >= 32 && code < 127 ? String.fromCharCode(code) : '.';
-        }).join('');
-
-        html += `<div class="emu-mem-line"><span class="emu-mem-addr">${lineAddr}</span> <span class="emu-mem-hex">${hexPart.padEnd(47)}</span> <span class="emu-mem-ascii">${asciiPart}</span></div>`;
-    }
-
-    dump.innerHTML = html;
-}
-
-async function refreshBreakpointList() {
-    const list = await ipcRenderer.invoke(IPC.EMU_BREAKPOINT_LIST);
-    if (list) renderBreakpoints(list);
-}
-
-function renderBreakpoints(bps: any[]) {
-    const listEl = $('emu-bp-list');
-    if (!listEl) return;
-
-    if (!bps || bps.length === 0) {
-        listEl.innerHTML = '<div style="color:var(--text-dim);font-size:11px;padding:4px;">No breakpoints set</div>';
-        return;
-    }
-
-    listEl.innerHTML = '';
-    for (const bp of bps) {
-        const row = document.createElement('div');
-        row.className = 'emu-bp-entry';
-        row.innerHTML = `
-            <span class="emu-bp-dot ${bp.enabled ? 'active' : 'disabled'}">●</span>
-            <span class="emu-bp-addr">${bp.addr}</span>
-            ${bp.hitCount ? `<span class="emu-bp-hits">(${bp.hitCount}×)</span>` : ''}
-            <button class="emu-bp-remove" title="Remove">✕</button>`;
-        row.querySelector('.emu-bp-remove')?.addEventListener('click', () => {
-            ipcRenderer.invoke(IPC.EMU_BREAKPOINT_REMOVE, bp.id);
-            setTimeout(() => refreshBreakpointList(), 500);
-        });
-        listEl.appendChild(row);
-    }
-}
-
-function renderBacktrace(frames: string[]) {
-    const listEl = $('emu-stack-list');
-    if (!listEl) return;
-
-    if (!frames || frames.length === 0) {
-        listEl.innerHTML = '<div style="color:var(--text-dim);font-size:11px;padding:4px;">No frames</div>';
-        return;
-    }
-
-    listEl.innerHTML = '';
-    for (const frame of frames) {
-        const row = document.createElement('div');
-        row.className = 'emu-stack-frame';
-        row.textContent = frame;
-        listEl.appendChild(row);
-    }
-}
+const { initEmulatorPanel } = _emulatorPanel;
 
 // ══════════════════════════════════════
 //  SETUP WIZARD
@@ -2925,8 +1827,20 @@ async function checkSetup(appState: any) {
         $('status-sdk').textContent = appState.sdkBundled
             ? '✓ SDK: Bundled'
             : `✓ SDK: ${nodePath.basename(sdkRoot)}`;
-        // Hide download section if SDK is found
+        // Hide download and partial sections if SDK is found
         $('setup-sdk-download').classList.add('hidden');
+        $('setup-sdk-partial').classList.add('hidden');
+    } else if (appState.sdkInstallState === 'partial') {
+        // Partial install: has bin/ but missing include/ and lib/
+        $('setup-sdk-status').className = 'sdk-missing';
+        $('setup-sdk-status').textContent = '⚠ Xbox 360 SDK partially installed (missing headers & libraries)';
+        $('status-sdk').textContent = '⚠ SDK: Partial Install';
+        $('statusbar').classList.add('status-error');
+        $('setup-sdk-download').classList.add('hidden');
+        $('setup-sdk-partial').classList.remove('hidden');
+        if (appState.sdkPartialPath) {
+            $('setup-sdk-partial-path').textContent = `Found at: ${appState.sdkPartialPath}`;
+        }
     } else {
         $('setup-sdk-status').className = 'sdk-missing';
         $('setup-sdk-status').textContent = '✗ Xbox 360 SDK not found';
@@ -2934,6 +1848,7 @@ async function checkSetup(appState: any) {
         $('statusbar').classList.add('status-error');
         // Show download section
         $('setup-sdk-download').classList.remove('hidden');
+        $('setup-sdk-partial').classList.add('hidden');
     }
     if (appState.firstRun) $('setup-overlay').classList.remove('hidden');
 }
@@ -2952,16 +1867,62 @@ $('setup-detect').addEventListener('click', async () => {
         $('setup-sdk-status').className = 'sdk-found';
         $('setup-sdk-status').innerHTML = `✓ Found SDK ${badge}<br><span style="font-size:11px;color:var(--text-dim)">${result.paths.root}</span>`;
         $('setup-sdk-download').classList.add('hidden');
+        $('setup-sdk-partial').classList.add('hidden');
     } else {
-        $('setup-sdk-status').className = 'sdk-missing';
-        $('setup-sdk-status').textContent = '✗ Could not auto-detect. Browse manually or download below.';
-        $('setup-sdk-download').classList.remove('hidden');
+        // Check if it's a partial install
+        const installState = await ipcRenderer.invoke(IPC.SDK_INSTALL_STATE);
+        if (installState && installState.state === 'partial') {
+            $('setup-sdk-status').className = 'sdk-missing';
+            $('setup-sdk-status').textContent = '⚠ Xbox 360 SDK partially installed (missing headers & libraries)';
+            $('setup-sdk-download').classList.add('hidden');
+            $('setup-sdk-partial').classList.remove('hidden');
+            if (installState.partialPath) {
+                $('setup-sdk-partial-path').textContent = `Found at: ${installState.partialPath}`;
+            }
+        } else {
+            $('setup-sdk-status').className = 'sdk-missing';
+            $('setup-sdk-status').textContent = '✗ Could not auto-detect. Browse manually or download below.';
+            $('setup-sdk-download').classList.remove('hidden');
+            $('setup-sdk-partial').classList.add('hidden');
+        }
     }
 });
 $('setup-download-btn').addEventListener('click', () => {
     // Open SDK download page in the user's browser
     shell.openExternal('https://archive.org/download/xbox-360-sdk-21256.3_202204/XBOX360%20SDK%2021256.3.zip');
     appendOutput('SDK download page opened in browser. After installing, click Auto-Detect.\n');
+});
+$('setup-prep-btn').addEventListener('click', async () => {
+    $('setup-prep-status').textContent = 'Creating registry keys...';
+    $('setup-prep-status').style.color = 'var(--text-dim)';
+    const result = await ipcRenderer.invoke(IPC.SDK_PREP_REGISTRY);
+    if (result.success) {
+        $('setup-prep-status').innerHTML = '✓ ' + result.message;
+        $('setup-prep-status').style.color = 'var(--xbox-green)';
+        $('setup-prep-btn').classList.add('hidden');
+        $('setup-cleanup-btn').classList.remove('hidden');
+        appendOutput('[SDK Prep] ' + result.message + '\n');
+    } else {
+        $('setup-prep-status').innerHTML = '✗ ' + result.message;
+        $('setup-prep-status').style.color = 'var(--error-red, #ff4444)';
+        appendOutput('[SDK Prep] Error: ' + result.message + '\n');
+    }
+});
+$('setup-cleanup-btn').addEventListener('click', async () => {
+    $('setup-prep-status').textContent = 'Removing registry keys...';
+    $('setup-prep-status').style.color = 'var(--text-dim)';
+    const result = await ipcRenderer.invoke(IPC.SDK_CLEANUP_REGISTRY);
+    if (result.success) {
+        $('setup-prep-status').innerHTML = '✓ ' + result.message;
+        $('setup-prep-status').style.color = 'var(--xbox-green)';
+        $('setup-cleanup-btn').classList.add('hidden');
+        $('setup-prep-btn').classList.remove('hidden');
+        appendOutput('[SDK Cleanup] ' + result.message + '\n');
+    } else {
+        $('setup-prep-status').innerHTML = '✗ ' + result.message;
+        $('setup-prep-status').style.color = 'var(--error-red, #ff4444)';
+        appendOutput('[SDK Cleanup] Error: ' + result.message + '\n');
+    }
 });
 $('setup-done').addEventListener('click', async () => {
     const p = ($('setup-sdk-path') as HTMLInputElement).value;
@@ -2980,117 +1941,1496 @@ $('setup-skip').addEventListener('click', async () => {
     $('setup-overlay').classList.add('hidden');
 });
 
-$('btn-settings').addEventListener('click', () => showSettingsPanel());
+// ══════════════════════════════════════
+//  TITLEBAR USERNAME + USER PANEL
+// ══════════════════════════════════════
 
-function showSettingsPanel() {
-    // Populate current values
-    (document.querySelectorAll('#settings-dialog input[type="color"]') as NodeListOf<HTMLInputElement>).forEach(inp => {
-        const key = inp.dataset.setting as keyof UserSettings;
-        if (key && userSettings[key]) inp.value = userSettings[key] as string;
-    });
-    ($('setting-font-size') as HTMLInputElement).value = String(userSettings.fontSize);
-    ($('setting-fancy-effects') as HTMLInputElement).checked = userSettings.fancyEffects;
-    $('settings-overlay').classList.remove('hidden');
+function updateTitlebarUser() {
+    const el = document.getElementById('titlebar-user');
+    if (!el) return;
+    const user = authService.getUser();
+    if (user) {
+        const initials = (user.username || '?').substring(0, 2).toUpperCase();
+        const color = user.role === 'admin' ? '#e5c07b' : '#4ec9b0';
+        el.innerHTML = `<div class="tu-avatar" style="background:${color}">${initials}</div><span class="tu-name">${user.username}</span>`;
+    } else {
+        el.innerHTML = '<span style="font-size:11px;color:var(--text-muted)">Not signed in</span>';
+    }
 }
 
-// Settings dialog event delegation
-document.addEventListener('click', (e) => {
-    const target = e.target as HTMLElement;
-    if (target.id === 'settings-close') {
-        $('settings-overlay').classList.add('hidden');
-    }
-    if (target.id === 'settings-reset') {
-        userSettings = { ...DEFAULT_SETTINGS };
-        saveUserSettings();
-        applyThemeColors();
-        applyFancyMode();
-        if (editor) editor.updateOptions({ fontSize: userSettings.fontSize });
-        $('status-zoom').textContent = '100%';
-        showSettingsPanel(); // refresh inputs
-    }
-    if (target.id === 'settings-open-setup') {
-        $('settings-overlay').classList.add('hidden');
-        $('setup-overlay').classList.remove('hidden');
-    }
-    if (target.id === 'settings-retake-tour') {
-        $('settings-overlay').classList.add('hidden');
-        setTimeout(() => startTour(), 300);
-    }
-    if (target.id === 'settings-reset-learning') {
-        if (confirm('Reset all learning progress? This clears your skill level, achievements, curriculum progress, and dismissed tips. You will see the onboarding wizard again on next launch.')) {
-            userProfile = { ...DEFAULT_PROFILE };
-            saveProfile();
-            renderLearnPanel();
-            renderTipsPanel();
-            $('settings-overlay').classList.add('hidden');
-            appendOutput('Learning progress reset. Restart to see onboarding wizard.\n');
-        }
-    }
-    if (target.id === 'settings-factory-reset') {
-        if (confirm('Factory reset EVERYTHING? This resets all theme colors, editor settings, learning progress, achievements, and tips. The IDE will return to its first-launch state.')) {
-            userSettings = { ...DEFAULT_SETTINGS };
-            saveUserSettings();
-            applyThemeColors();
-            applyFancyMode();
-            if (editor) editor.updateOptions({ fontSize: 14 });
-            $('status-zoom').textContent = '100%';
-            userProfile = { ...DEFAULT_PROFILE };
-            saveProfile();
-            renderLearnPanel();
-            renderTipsPanel();
-            $('settings-overlay').classList.add('hidden');
-            appendOutput('Factory reset complete. Restart to see onboarding wizard.\n');
-        }
-    }
-});
+function updateConnectionStatus(state: any) {
+    const el = document.getElementById('status-connection');
+    if (!el) return;
 
-// Live-update colors as user picks them
-document.addEventListener('input', (e) => {
-    const target = e.target as HTMLInputElement;
-    if (!target.dataset.setting) return;
-    const key = target.dataset.setting as keyof UserSettings;
-    if (key === 'fontSize') {
-        const v = parseInt(target.value) || 14;
-        userSettings.fontSize = Math.max(8, Math.min(40, v));
-        if (editor) editor.updateOptions({ fontSize: userSettings.fontSize });
-        $('status-zoom').textContent = `${Math.round((userSettings.fontSize / 14) * 100)}%`;
+    if (state.offlineMode) {
+        // Offline mode — user can keep working
+        const queued = state.queuedActions || 0;
+        const queueText = queued > 0 ? ` · ${queued} queued` : '';
+
+        if (state.syncInProgress) {
+            el.className = 'status-connection status-conn-syncing';
+            el.textContent = '⬤ Syncing...';
+            el.title = `Reconnected — syncing ${queued} queued actions`;
+        } else {
+            el.className = 'status-connection status-conn-offline-mode';
+            el.textContent = `⬤ Offline Mode${queueText}`;
+            el.title = `Working offline — server unreachable since ${state.lastConnected || 'startup'}. Your work is saved locally. Changes will sync when reconnected.`;
+        }
+
+        // Show offline banner if not already showing
+        showOfflineBanner(state);
+
+    } else if (state.authenticated && state.serverOnline) {
+        el.className = 'status-connection status-conn-auth';
+        el.textContent = '⬤ Connected';
+        el.title = `Server online · Authenticated · v${state.serverVersion || '?'} · Uptime: ${state.serverUptime || 0}s`;
+        hideOfflineBanner();
+
+    } else if (state.serverOnline && !state.authenticated) {
+        el.className = 'status-connection status-conn-online';
+        el.textContent = '⬤ Online';
+        el.title = 'Server reachable · Not signed in';
+        hideOfflineBanner();
+
+    } else if (state.failCount > 0 && state.failCount < 3) {
+        el.className = 'status-connection status-conn-lost';
+        el.textContent = '⬤ Reconnecting...';
+        el.title = `Connection lost · Attempt ${state.failCount}/3`;
+
     } else {
-        (userSettings as any)[key] = target.value;
+        el.className = 'status-connection status-conn-offline';
+        el.textContent = '⬤ Offline';
+        el.title = state.failCount >= 3 ? 'Server unreachable' : 'Not connected to server';
     }
-    applyThemeColors();
+}
+
+// ── Offline Mode Banner ──
+
+let _offlineBannerShown = false;
+
+function showOfflineBanner(state: any) {
+    if (_offlineBannerShown) {
+        // Update queued count in existing banner
+        const countEl = document.getElementById('offline-banner-count');
+        if (countEl) countEl.textContent = `${state.queuedActions || 0} actions queued`;
+        return;
+    }
+    _offlineBannerShown = true;
+
+    const banner = document.createElement('div');
+    banner.id = 'offline-banner';
+    banner.className = 'offline-banner';
+    banner.innerHTML = `
+        <div class="offline-banner-content">
+            <span class="offline-banner-icon">⚡</span>
+            <div class="offline-banner-text">
+                <strong>Offline Mode</strong> — Server connection lost. You can continue working normally.
+                <span id="offline-banner-count">${state.queuedActions || 0} actions queued</span>
+                will sync automatically when reconnected.
+            </div>
+            <button class="offline-banner-dismiss" id="offline-banner-close">✕</button>
+        </div>`;
+
+    // Insert after the menubar, before the main content
+    const main = document.getElementById('main');
+    if (main && main.parentElement) {
+        main.parentElement.insertBefore(banner, main);
+    } else {
+        document.body.appendChild(banner);
+    }
+
+    document.getElementById('offline-banner-close')?.addEventListener('click', () => {
+        banner.classList.add('offline-banner-dismissed');
+    });
+}
+
+function hideOfflineBanner() {
+    if (!_offlineBannerShown) return;
+    _offlineBannerShown = false;
+    const banner = document.getElementById('offline-banner');
+    if (banner) {
+        // Show a brief "reconnected" message before removing
+        banner.innerHTML = `
+            <div class="offline-banner-content offline-banner-reconnected">
+                <span class="offline-banner-icon">✓</span>
+                <div class="offline-banner-text">
+                    <strong>Reconnected!</strong> — All changes have been synced.
+                </div>
+            </div>`;
+        banner.className = 'offline-banner offline-banner-success';
+        setTimeout(() => banner.remove(), 4000);
+    }
+}
+
+// ── Internet Connectivity Monitor ──
+
+let _noInternetToastShown = false;
+
+function checkInternetConnectivity() {
+    if (!navigator.onLine) {
+        showNoInternetToast();
+    }
+}
+
+function showNoInternetToast() {
+    if (_noInternetToastShown) return;
+    _noInternetToastShown = true;
+
+    const existing = document.getElementById('no-internet-toast');
+    if (existing) existing.remove();
+
+    const toast = document.createElement('div');
+    toast.id = 'no-internet-toast';
+    toast.style.cssText = 'position:fixed;bottom:60px;left:50%;transform:translateX(-50%) translateY(20px);opacity:0;z-index:9999;background:#1e1e2e;border:1px solid #f97316;border-radius:8px;padding:14px 18px;max-width:440px;box-shadow:0 8px 32px rgba(0,0,0,0.5);transition:opacity 0.3s,transform 0.3s;font-family:var(--font);';
+    toast.innerHTML = `
+        <div style="display:flex;align-items:flex-start;gap:12px;">
+            <div style="font-size:24px;flex-shrink:0;margin-top:2px;color:#f97316;">⚠</div>
+            <div style="flex:1;">
+                <div style="font-size:13px;font-weight:600;color:#f97316;margin-bottom:4px;">No Internet Connection</div>
+                <div style="font-size:12px;color:#cccccc;line-height:1.5;margin-bottom:10px;">Some features are unavailable without an internet connection, including community forums, GitHub integration, cloud settings sync, and AI assistance.</div>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                    <button id="no-internet-wifi-btn" style="padding:6px 14px;background:#f97316;color:white;border:none;border-radius:4px;font-size:12px;font-weight:600;cursor:pointer;font-family:var(--font);">Check Network Settings</button>
+                    <button id="no-internet-retry-btn" style="padding:6px 14px;background:transparent;color:#cccccc;border:1px solid #404040;border-radius:4px;font-size:12px;cursor:pointer;font-family:var(--font);">Retry</button>
+                    <button id="no-internet-dismiss-btn" style="padding:6px 12px;background:transparent;color:#858585;border:1px solid #404040;border-radius:4px;font-size:12px;cursor:pointer;font-family:var(--font);">Dismiss</button>
+                </div>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(toast);
+    requestAnimationFrame(() => { toast.style.opacity = '1'; toast.style.transform = 'translateX(-50%) translateY(0)'; });
+
+    document.getElementById('no-internet-wifi-btn')!.addEventListener('click', () => {
+        // Open Windows network settings
+        try {
+            const { execSync } = require('child_process');
+            // Try Windows 10+ Settings app first
+            try { execSync('start ms-settings:network-wifi', { shell: true, windowsHide: true }); }
+            catch {
+                // Fallback for Windows 7/8 — open Network Connections control panel
+                try { execSync('ncpa.cpl', { shell: true, windowsHide: true }); }
+                catch { shell.openExternal('https://support.microsoft.com/en-us/windows/connect-to-a-wi-fi-network'); }
+            }
+        } catch {}
+    });
+
+    document.getElementById('no-internet-retry-btn')!.addEventListener('click', () => {
+        hideNoInternetToast();
+        // Re-check after a brief delay
+        setTimeout(() => {
+            if (!navigator.onLine) {
+                showNoInternetToast();
+            } else {
+                // Connection restored — trigger re-init of online features
+                appendOutput('Internet connection restored.\n');
+            }
+        }, 1000);
+    });
+
+    document.getElementById('no-internet-dismiss-btn')!.addEventListener('click', () => {
+        hideNoInternetToast();
+    });
+}
+
+function hideNoInternetToast() {
+    _noInternetToastShown = false;
+    const toast = document.getElementById('no-internet-toast');
+    if (toast) {
+        toast.style.opacity = '0';
+        toast.style.transform = 'translateX(-50%) translateY(20px)';
+        setTimeout(() => toast.remove(), 300);
+    }
+}
+
+// Listen for auth changes to update titlebar
+authService.onAuthStateChange(() => updateTitlebarUser());
+
+// Click handler for titlebar user
+document.getElementById('titlebar-user')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleUserPanel();
+});
+
+let _userPanelOpen = false;
+
+function toggleUserPanel() {
+    if (_userPanelOpen) { closeUserPanel(); return; }
+    _userPanelOpen = true;
+
+    const user = authService.getUser();
+    const isAdmin = authService.isAdmin();
+
+    const overlay = document.createElement('div');
+    overlay.id = 'user-panel-overlay';
+    overlay.addEventListener('click', () => closeUserPanel());
+    document.body.appendChild(overlay);
+
+    const panel = document.createElement('div');
+    panel.id = 'user-panel';
+
+    if (user) {
+        const initials = (user.username || '?').substring(0, 2).toUpperCase();
+        const color = user.role === 'admin' ? '#e5c07b' : '#4ec9b0';
+        panel.innerHTML = `
+            <div class="up-header">
+                <div class="up-user-row">
+                    <div class="auth-avatar-lg" style="background:${color}">${initials}</div>
+                    <div>
+                        <div class="up-name">${user.username}</div>
+                        <div class="up-email">${user.email}</div>
+                        <div class="up-role" style="color:${color}">${user.role.toUpperCase()}</div>
+                    </div>
+                </div>
+            </div>
+            ${isAdmin ? `
+            <div class="up-section">
+                <div class="up-item up-item-dev" data-action="devpanel"><span class="up-item-icon">🛡</span>Developer Panel</div>
+            </div>` : ''}
+            <div class="up-section">
+                <div class="up-section-title">IDE</div>
+                <div class="up-item" data-action="settings"><span class="up-item-icon">⚙</span>Settings</div>
+            </div>
+            <div class="up-section">
+                <div class="up-section-title">Account</div>
+                <div class="up-item up-item-danger" data-action="signout"><span class="up-item-icon">↪</span>Sign Out</div>
+            </div>`;
+    } else {
+        panel.innerHTML = `
+            <div class="up-header" style="text-align:center;padding:24px 18px">
+                <div style="font-size:14px;font-weight:600;color:var(--text);margin-bottom:4px">Not signed in</div>
+                <div style="font-size:11px;color:var(--text-dim)">Sign in to access cloud lessons and admin features</div>
+            </div>
+            <div class="up-section">
+                <div class="up-item" data-action="signin"><span class="up-item-icon">🔑</span>Sign In</div>
+                <div class="up-item" data-action="register"><span class="up-item-icon">✦</span>Create Account</div>
+            </div>
+            <div class="up-section">
+                <div class="up-section-title">IDE</div>
+                <div class="up-item" data-action="settings"><span class="up-item-icon">⚙</span>Settings</div>
+            </div>`;
+    }
+
+    panel.addEventListener('click', (e) => {
+        const item = (e.target as HTMLElement).closest('.up-item') as HTMLElement;
+        if (!item) return;
+        const action = item.dataset.action;
+        closeUserPanel();
+        switch (action) {
+            case 'settings': showSettingsPanel(); break;
+            case 'signout': authService.logout(); break;
+            case 'signin': authUI.showLogin(); break;
+            case 'register': authUI.showRegister(); break;
+            case 'devpanel': openDevPanel(); break;
+        }
+    });
+
+    document.body.appendChild(panel);
+}
+
+function closeUserPanel() {
+    _userPanelOpen = false;
+    document.getElementById('user-panel-overlay')?.remove();
+    document.getElementById('user-panel')?.remove();
+}
+
+// ══════════════════════════════════════
+//  DEVELOPER PANEL (floating overlay)
+// ══════════════════════════════════════
+
+let _devPanelOpen = false;
+
+function openDevPanel() {
+    if (_devPanelOpen) { closeDevPanel(); return; }
+    if (!authService.isAdmin()) return;
+    _devPanelOpen = true;
+
+    const overlay = document.createElement('div');
+    overlay.id = 'devpanel-overlay';
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) closeDevPanel(); });
+    document.body.appendChild(overlay);
+
+    const win = document.createElement('div');
+    win.id = 'devpanel-window';
+
+    // Title bar
+    const titlebar = document.createElement('div');
+    titlebar.className = 'dp-titlebar';
+    titlebar.innerHTML = `
+        <span class="dp-title">🛡 Developer Panel</span>
+        <div class="dp-tabs">
+            <button class="dp-tab active" data-tab="users">Users</button>
+            <button class="dp-tab" data-tab="builder">Lesson Builder</button>
+            <button class="dp-tab" data-tab="uidesigner">UI Designer</button>
+        </div>
+        <button class="dp-close" id="dp-close">✕</button>`;
+    win.appendChild(titlebar);
+
+    // Content area
+    const content = document.createElement('div');
+    content.className = 'dp-content';
+    content.id = 'dp-content';
+    win.appendChild(content);
+
+    overlay.appendChild(win);
+    requestAnimationFrame(() => overlay.classList.add('visible'));
+
+    // Wire tabs
+    titlebar.addEventListener('click', (e) => {
+        const tab = (e.target as HTMLElement).closest('.dp-tab') as HTMLElement;
+        if (tab) {
+            titlebar.querySelectorAll('.dp-tab').forEach(t => t.classList.remove('active'));
+            tab.classList.add('active');
+            renderDevPanelTab(content, tab.dataset.tab!);
+        }
+    });
+
+    document.getElementById('dp-close')!.addEventListener('click', closeDevPanel);
+
+    // Escape key closes
+    const escHandler = (e: KeyboardEvent) => {
+        if (e.key === 'Escape') { closeDevPanel(); document.removeEventListener('keydown', escHandler); }
+    };
+    document.addEventListener('keydown', escHandler);
+
+    // Render default tab
+    renderDevPanelTab(content, 'users');
+
+    // Make draggable by titlebar
+    makeDraggable(win, titlebar);
+}
+
+function closeDevPanel() {
+    _devPanelOpen = false;
+    const overlay = document.getElementById('devpanel-overlay');
+    if (overlay) {
+        overlay.classList.remove('visible');
+        setTimeout(() => overlay.remove(), 200);
+    }
+}
+
+function makeDraggable(win: HTMLElement, handle: HTMLElement) {
+    let dragging = false, startX = 0, startY = 0, origLeft = 0, origTop = 0;
+    handle.addEventListener('mousedown', (e) => {
+        if ((e.target as HTMLElement).closest('.dp-tab, .dp-close')) return;
+        dragging = true;
+        startX = e.clientX; startY = e.clientY;
+        const rect = win.getBoundingClientRect();
+        origLeft = rect.left; origTop = rect.top;
+        // Switch to fixed positioning for drag (avoids sub-pixel transform)
+        win.style.position = 'fixed';
+        win.style.left = origLeft + 'px';
+        win.style.top = origTop + 'px';
+        win.style.margin = '0';
+        win.style.transition = 'none';
+        e.preventDefault();
+    });
+    document.addEventListener('mousemove', (e) => {
+        if (!dragging) return;
+        const dx = e.clientX - startX, dy = e.clientY - startY;
+        win.style.left = Math.round(origLeft + dx) + 'px';
+        win.style.top = Math.round(origTop + dy) + 'px';
+    });
+    document.addEventListener('mouseup', () => { dragging = false; });
+}
+
+async function renderDevPanelTab(container: HTMLElement, tab: string) {
+    if (tab === 'users') {
+        await renderDevPanelUsers(container);
+    } else if (tab === 'builder') {
+        renderDevPanelBuilder(container);
+    } else if (tab === 'uidesigner') {
+        renderUIDesigner(container);
+    }
+}
+
+async function renderDevPanelUsers(container: HTMLElement) {
+    container.innerHTML = '<div class="dp-loading">Loading users...</div>';
+
+    const result = await authService.getUsers();
+    if (!result.success) {
+        container.innerHTML = `<div class="dp-error">${result.error || 'Failed to load users'}</div>`;
+        return;
+    }
+
+    const users = result.users || [];
+    container.innerHTML = '';
+
+    const header = document.createElement('div');
+    header.className = 'dp-section-header';
+    header.innerHTML = `<span>Registered Users (${users.length})</span>`;
+    container.appendChild(header);
+
+    const list = document.createElement('div');
+    list.className = 'dp-user-list';
+
+    for (const user of users) {
+        const isMe = authService.getUser()?.id === user.id;
+        const color = user.role === 'admin' ? '#e5c07b' : '#4ec9b0';
+        const initials = (user.username || '?').substring(0, 2).toUpperCase();
+        const item = document.createElement('div');
+        item.className = 'dp-user-item';
+        item.innerHTML = `
+            <div class="dp-user-avatar" style="background:${color}">${initials}</div>
+            <div class="dp-user-info">
+                <div class="dp-user-name">${user.username} ${isMe ? '<span class="dp-you">(you)</span>' : ''}</div>
+                <div class="dp-user-email">${user.email}</div>
+            </div>
+            <div class="dp-user-role" style="color:${color}">${user.role.toUpperCase()}</div>
+            <div class="dp-user-actions">
+                ${!isMe && user.role !== 'admin' ? `<button class="dp-btn dp-btn-promote" data-uid="${user.id}" data-action="promote">Promote</button>` : ''}
+                ${!isMe && user.role === 'admin' ? `<button class="dp-btn dp-btn-demote" data-uid="${user.id}" data-action="demote">Demote</button>` : ''}
+                ${!isMe ? `<button class="dp-btn dp-btn-delete" data-uid="${user.id}" data-action="delete">✕</button>` : ''}
+            </div>`;
+        list.appendChild(item);
+    }
+
+    list.addEventListener('click', async (e) => {
+        const btn = (e.target as HTMLElement).closest('[data-action]') as HTMLElement;
+        if (!btn) return;
+        const uid = btn.dataset.uid!;
+        const action = btn.dataset.action!;
+        if (action === 'promote' && confirm('Promote this user to admin?')) {
+            await authService.promoteUser(uid, 'admin');
+            renderDevPanelUsers(container);
+        } else if (action === 'demote' && confirm('Remove admin privileges?')) {
+            await authService.demoteUser(uid);
+            renderDevPanelUsers(container);
+        } else if (action === 'delete' && confirm('Delete this user permanently?')) {
+            await authService.deleteUser(uid);
+            renderDevPanelUsers(container);
+        }
+    });
+
+    container.appendChild(list);
+
+    // ── Engine Tests ──
+    const testSection = document.createElement('div');
+    testSection.className = 'dp-section-header';
+    testSection.innerHTML = '<span>Engine Tests</span>';
+    container.appendChild(testSection);
+
+    const testGrid = document.createElement('div');
+    testGrid.style.cssText = 'padding:0 12px 16px; display:flex; flex-wrap:wrap; gap:6px;';
+
+    const testBlankBtn = document.createElement('button');
+    testBlankBtn.className = 'dp-btn';
+    testBlankBtn.textContent = 'Test Blank Engine';
+    testBlankBtn.title = 'Opens the cinematic engine with NO package loaded — should show empty state';
+    testBlankBtn.addEventListener('click', () => {
+        closeDevPanel();
+        // Force-clear the package so the engine has nothing
+        cinematicEngine.loadLesson({ blocks: [], oldCode: [], explanations: {}, connections: {}, tokens: {} });
+        // Now tell it to load a truly empty package by wiping internal state
+        openCinematicTutorBlank();
+    });
+    testGrid.appendChild(testBlankBtn);
+
+
+    container.appendChild(testGrid);
+}
+
+async function openCinematicTutorBlank() {
+    const tabPath = '__cinematic__:blank_test';
+    const existing = openTabs.find((t: any) => t.path === tabPath);
+    if (existing) { switchToTab(tabPath); return; }
+
+    if (!cinematicContainer) {
+        cinematicContainer = document.createElement('div');
+        cinematicContainer.id = 'cinematic-container';
+        cinematicContainer.style.cssText = 'display:none; flex:1; flex-direction:column; overflow:hidden; background:var(--bg-dark);';
+        $('editor-area').appendChild(cinematicContainer);
+    }
+
+    // Do NOT load any lesson — mount with empty state
+    cinematicEngine.unmount();
+    // Clear internal package state by loading an empty shell
+    (cinematicEngine as any).loadLesson({ format: 'nexia-lesson-v2', blocks: [], overlay: { explanations: {}, connections: {}, tokens: {}, visualizers: {}, tokenVisualizers: {} } });
+    cinematicEngine.mount(cinematicContainer);
+
+    const monaco = (window as any).monaco;
+    const model = monaco?.editor?.createModel?.('', 'plaintext') || { dispose: () => {}, getValue: () => '' };
+    openTabs.push({ path: tabPath, name: '\ud83e\uddea Blank Engine Test', model, modified: false });
+    switchToTab(tabPath);
+}
+
+function renderDevPanelBuilder(container: HTMLElement) {
+    // Delegate to the admin panel's builder
+    adminPanel.render(container);
+}
+
+// ══════════════════════════════════════
+//  UI DESIGNER (Developer Panel tab)
+// ══════════════════════════════════════
+
+interface UILayoutConfig {
+    sidebar: {
+        tabs: { id: string; icon: string; title: string; visible: boolean; }[];
+        defaultWidth: number;
+    };
+    bottomPanel: {
+        defaultHeight: number;
+    };
+    menuBar: {
+        items: { id: string; label: string; visible: boolean; }[];
+    };
+    welcome: {
+        logoEmoji: string;
+        title: string;
+        subtitle: string;
+        showNewProject: boolean;
+        showOpenProject: boolean;
+        customHtml: string;
+    };
+}
+
+function getDefaultLayoutConfig(): UILayoutConfig {
+    return {
+        sidebar: {
+            tabs: [
+                { id: 'explorer', icon: '📁', title: 'Explorer', visible: true },
+                { id: 'search', icon: '🔍', title: 'Find in Files', visible: true },
+                { id: 'ai', icon: '🤖', title: 'Nexia AI', visible: true },
+                { id: 'extensions', icon: '🧩', title: 'Extensions', visible: true },
+                { id: 'git', icon: '🔀', title: 'Source Control', visible: true },
+                { id: 'devkit', icon: '📡', title: 'Devkit', visible: true },
+                { id: 'emulator', icon: '🎮', title: 'Emulator', visible: true },
+                { id: 'learn', icon: '🎓', title: 'Learn', visible: true },
+                { id: 'study', icon: '📝', title: 'Study & Quizzes', visible: true },
+                { id: 'community', icon: '💬', title: 'Community', visible: true },
+            ],
+            defaultWidth: 260,
+        },
+        bottomPanel: {
+            defaultHeight: 200,
+        },
+        menuBar: {
+            items: [
+                { id: 'file', label: 'File', visible: true },
+                { id: 'edit', label: 'Edit', visible: true },
+                { id: 'build', label: 'Build', visible: true },
+                { id: 'view', label: 'View', visible: true },
+            ],
+        },
+        welcome: {
+            logoEmoji: '🎮',
+            title: 'Nexia IDE',
+            subtitle: 'Xbox 360 Development Environment',
+            showNewProject: true,
+            showOpenProject: true,
+            customHtml: '',
+        },
+    };
+}
+
+let _uiLayoutConfig: UILayoutConfig | null = null;
+
+function loadUILayoutConfig(): UILayoutConfig {
+    if (_uiLayoutConfig) return _uiLayoutConfig;
+
+    let config: UILayoutConfig;
+    try {
+        const configPath = nodePath.join(nodeOs.homedir(), '.nexia-ide-layout.json');
+        if (nodeFs.existsSync(configPath)) {
+            config = JSON.parse(nodeFs.readFileSync(configPath, 'utf-8'));
+        } else {
+            config = getDefaultLayoutConfig();
+        }
+    } catch {
+        config = getDefaultLayoutConfig();
+    }
+
+    // Auto-discover sidebar tabs from the DOM that aren't in the config yet
+    // This ensures newly added tabs (e.g. Source Control) appear automatically
+    config.sidebar.tabs = reconcileSidebarTabs(config.sidebar.tabs);
+
+    _uiLayoutConfig = config;
+    return _uiLayoutConfig!;
+}
+
+/**
+ * Scans the DOM for all .sidebar-tab buttons and merges any missing ones
+ * into the config's tab list. Preserves user ordering and visibility for
+ * tabs that already exist in the config.
+ */
+function reconcileSidebarTabs(configTabs: { id: string; icon: string; title: string; visible: boolean }[]): { id: string; icon: string; title: string; visible: boolean }[] {
+    const domTabs = Array.from(document.querySelectorAll('.sidebar-tab')) as HTMLElement[];
+    if (domTabs.length === 0) return configTabs; // DOM not ready yet
+
+    const configIds = new Set(configTabs.map(t => t.id));
+    const merged = [...configTabs];
+
+    for (const el of domTabs) {
+        const id = el.dataset.panel;
+        if (!id || configIds.has(id)) continue;
+
+        // New tab found in DOM — extract its info and append
+        const icon = el.textContent?.trim() || '📌';
+        const title = el.getAttribute('title') || id.charAt(0).toUpperCase() + id.slice(1);
+        merged.push({ id, icon, title, visible: true });
+    }
+
+    // Also remove any config tabs whose panels no longer exist in the DOM
+    // (but only if the DOM has loaded — check for at least the explorer tab)
+    const domIds = new Set(domTabs.map(el => el.dataset.panel).filter(Boolean));
+    if (domIds.has('explorer')) {
+        return merged.filter(t => domIds.has(t.id));
+    }
+
+    return merged;
+}
+
+function saveUILayoutConfig(config: UILayoutConfig) {
+    _uiLayoutConfig = config;
+    try {
+        const configPath = nodePath.join(nodeOs.homedir(), '.nexia-ide-layout.json');
+        nodeFs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+    } catch (err) {
+        console.error('Failed to save layout config:', err);
+    }
+}
+
+function renderUIDesigner(container: HTMLElement) {
+    // Clear cached config so we re-scan the DOM for any new tabs
+    _uiLayoutConfig = null;
+    const config = loadUILayoutConfig();
+    container.innerHTML = '';
+
+    const wrapper = document.createElement('div');
+    wrapper.className = 'uid-wrapper';
+
+    // ── Left: config sections ──
+    const editor = document.createElement('div');
+    editor.className = 'uid-editor';
+
+    // Sidebar Tabs section
+    editor.innerHTML = `
+        <div class="uid-section">
+            <div class="uid-section-title">SIDEBAR TABS <span class="uid-hint">Drag to reorder · Toggle visibility</span></div>
+            <div class="uid-tab-list" id="uid-tab-list"></div>
+        </div>
+        <div class="uid-section">
+            <div class="uid-section-title">PANEL SIZES</div>
+            <div class="uid-slider-row">
+                <label>Sidebar Width</label>
+                <input type="range" min="180" max="400" value="${config.sidebar.defaultWidth}" id="uid-sidebar-w" class="uid-slider">
+                <span id="uid-sidebar-w-val">${config.sidebar.defaultWidth}px</span>
+            </div>
+            <div class="uid-slider-row">
+                <label>Bottom Panel Height</label>
+                <input type="range" min="100" max="500" value="${config.bottomPanel.defaultHeight}" id="uid-bottom-h" class="uid-slider">
+                <span id="uid-bottom-h-val">${config.bottomPanel.defaultHeight}px</span>
+            </div>
+        </div>
+        <div class="uid-section">
+            <div class="uid-section-title">MENU BAR</div>
+            <div class="uid-menu-list" id="uid-menu-list"></div>
+        </div>
+        <div class="uid-section">
+            <div class="uid-section-title">WELCOME SCREEN</div>
+            <div class="uid-field-row"><label>Logo Emoji</label><input type="text" class="uid-field" id="uid-welcome-logo" value="${config.welcome.logoEmoji}" maxlength="4"></div>
+            <div class="uid-field-row"><label>Title</label><input type="text" class="uid-field" id="uid-welcome-title" value="${escapeHtml(config.welcome.title)}" spellcheck="false"></div>
+            <div class="uid-field-row"><label>Subtitle</label><input type="text" class="uid-field" id="uid-welcome-subtitle" value="${escapeHtml(config.welcome.subtitle)}" spellcheck="false"></div>
+            <div class="uid-check-row"><input type="checkbox" id="uid-welcome-new" ${config.welcome.showNewProject ? 'checked' : ''}> <label for="uid-welcome-new">Show "New Project" button</label></div>
+            <div class="uid-check-row"><input type="checkbox" id="uid-welcome-open" ${config.welcome.showOpenProject ? 'checked' : ''}> <label for="uid-welcome-open">Show "Open Project" button</label></div>
+        </div>
+        <div class="uid-actions">
+            <button class="dp-btn dp-btn-promote" id="uid-apply">Apply to IDE</button>
+            <button class="dp-btn" id="uid-export">Export nexia-layout.json</button>
+            <button class="dp-btn" id="uid-reset">Reset to Defaults</button>
+        </div>`;
+
+    wrapper.appendChild(editor);
+
+    // ── Right: live preview ──
+    const preview = document.createElement('div');
+    preview.className = 'uid-preview';
+    preview.id = 'uid-preview';
+    wrapper.appendChild(preview);
+
+    container.appendChild(wrapper);
+
+    // Populate sortable tab list
+    renderSidebarTabList(config);
+    renderMenuBarList(config);
+    renderUIPreview(config);
+
+    // Wire sliders
+    const sidebarSlider = document.getElementById('uid-sidebar-w') as HTMLInputElement;
+    const bottomSlider = document.getElementById('uid-bottom-h') as HTMLInputElement;
+    sidebarSlider.addEventListener('input', () => {
+        config.sidebar.defaultWidth = parseInt(sidebarSlider.value);
+        document.getElementById('uid-sidebar-w-val')!.textContent = sidebarSlider.value + 'px';
+        renderUIPreview(config);
+    });
+    bottomSlider.addEventListener('input', () => {
+        config.bottomPanel.defaultHeight = parseInt(bottomSlider.value);
+        document.getElementById('uid-bottom-h-val')!.textContent = bottomSlider.value + 'px';
+        renderUIPreview(config);
+    });
+
+    // Wire welcome fields
+    ['uid-welcome-logo', 'uid-welcome-title', 'uid-welcome-subtitle'].forEach(id => {
+        document.getElementById(id)?.addEventListener('input', () => {
+            config.welcome.logoEmoji = (document.getElementById('uid-welcome-logo') as HTMLInputElement).value;
+            config.welcome.title = (document.getElementById('uid-welcome-title') as HTMLInputElement).value;
+            config.welcome.subtitle = (document.getElementById('uid-welcome-subtitle') as HTMLInputElement).value;
+            renderUIPreview(config);
+        });
+    });
+    ['uid-welcome-new', 'uid-welcome-open'].forEach(id => {
+        document.getElementById(id)?.addEventListener('change', () => {
+            config.welcome.showNewProject = (document.getElementById('uid-welcome-new') as HTMLInputElement).checked;
+            config.welcome.showOpenProject = (document.getElementById('uid-welcome-open') as HTMLInputElement).checked;
+            renderUIPreview(config);
+        });
+    });
+
+    // Wire action buttons
+    document.getElementById('uid-apply')!.addEventListener('click', () => {
+        saveUILayoutConfig(config);
+        applyUILayout(config);
+        appendOutput('UI layout applied and saved.\n');
+    });
+    document.getElementById('uid-export')!.addEventListener('click', async () => {
+        saveUILayoutConfig(config);
+        try {
+            const { ipcRenderer: ipc } = require('electron');
+            const result = await ipc.invoke('file:selectDir');
+            if (result) {
+                const outPath = nodePath.join(result, 'nexia-layout.json');
+                nodeFs.writeFileSync(outPath, JSON.stringify(config, null, 2));
+                appendOutput('Exported layout to: ' + outPath + '\n');
+            }
+        } catch {
+            // Fallback: just save to home dir
+            const outPath = nodePath.join(nodeOs.homedir(), 'nexia-layout.json');
+            nodeFs.writeFileSync(outPath, JSON.stringify(config, null, 2));
+            appendOutput('Exported layout to: ' + outPath + '\n');
+        }
+    });
+    document.getElementById('uid-reset')!.addEventListener('click', () => {
+        if (!confirm('Reset UI layout to defaults?')) return;
+        _uiLayoutConfig = getDefaultLayoutConfig();
+        renderUIDesigner(container);
+    });
+}
+
+function escapeHtml(s: string): string {
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function renderSidebarTabList(config: UILayoutConfig) {
+    const list = document.getElementById('uid-tab-list');
+    if (!list) return;
+    list.innerHTML = '';
+
+    config.sidebar.tabs.forEach((tab, i) => {
+        const item = document.createElement('div');
+        item.className = 'uid-tab-item' + (tab.visible ? '' : ' uid-hidden-tab');
+        item.draggable = true;
+        item.dataset.index = String(i);
+        item.innerHTML = `
+            <span class="uid-drag-handle">⠿</span>
+            <span class="uid-tab-icon">${tab.icon}</span>
+            <span class="uid-tab-name">${tab.title}</span>
+            <button class="uid-remove-btn" data-ridx="${i}" title="Remove">✕</button>
+            <label class="uid-toggle"><input type="checkbox" ${tab.visible ? 'checked' : ''} data-tidx="${i}"><span class="uid-toggle-slider"></span></label>`;
+        list.appendChild(item);
+    });
+
+    // Add new tab button
+    const addBtn = document.createElement('div');
+    addBtn.className = 'uid-add-item';
+    addBtn.innerHTML = '<span>＋</span> Add Sidebar Tab';
+    addBtn.addEventListener('click', () => {
+        const icon = prompt('Emoji icon for the tab:', '📌');
+        if (!icon) return;
+        const title = prompt('Tab title:', 'Custom Tab');
+        if (!title) return;
+        const id = 'custom_' + Date.now();
+        config.sidebar.tabs.push({ id, icon, title, visible: true });
+
+        // Create the actual sidebar tab button in the DOM
+        const tabContainer = document.getElementById('sidebar-tabs');
+        if (tabContainer) {
+            const btn = document.createElement('button');
+            btn.className = 'sidebar-tab';
+            btn.dataset.panel = id;
+            btn.title = title;
+            btn.textContent = icon;
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('.sidebar-tab').forEach(t => t.classList.remove('active'));
+                document.querySelectorAll('.sidebar-panel').forEach(p => p.classList.remove('active'));
+                btn.classList.add('active');
+                document.getElementById(`panel-${id}`)?.classList.add('active');
+            });
+            tabContainer.appendChild(btn);
+        }
+
+        // Create the panel container in the DOM
+        const sidebarContent = document.getElementById('sidebar-content');
+        if (sidebarContent) {
+            const panel = document.createElement('div');
+            panel.id = `panel-${id}`;
+            panel.className = 'sidebar-panel';
+            panel.innerHTML = `
+                <div class="panel-header">${title.toUpperCase()}</div>
+                <div class="panel-body">
+                    <div class="git-empty" style="padding:24px 16px;text-align:center">
+                        <div class="git-empty-icon">${icon}</div>
+                        <div class="git-empty-text">${title}</div>
+                        <div class="git-empty-hint">Custom panel — use extensions or the API to add content here</div>
+                    </div>
+                </div>`;
+            sidebarContent.appendChild(panel);
+        }
+
+        renderSidebarTabList(config);
+        renderUIPreview(config);
+        saveUILayoutConfig(config);
+    });
+    list.appendChild(addBtn);
+
+    // Drag-and-drop reordering
+    let dragIdx: number | null = null;
+    list.addEventListener('dragstart', (e: DragEvent) => {
+        const item = (e.target as HTMLElement).closest('.uid-tab-item') as HTMLElement;
+        if (item) { dragIdx = parseInt(item.dataset.index!); item.classList.add('uid-dragging'); }
+    });
+    list.addEventListener('dragover', (e: DragEvent) => {
+        e.preventDefault();
+        const item = (e.target as HTMLElement).closest('.uid-tab-item') as HTMLElement;
+        if (item) item.classList.add('uid-drag-over');
+    });
+    list.addEventListener('dragleave', (e: DragEvent) => {
+        const item = (e.target as HTMLElement).closest('.uid-tab-item') as HTMLElement;
+        if (item) item.classList.remove('uid-drag-over');
+    });
+    list.addEventListener('drop', (e: DragEvent) => {
+        e.preventDefault();
+        const item = (e.target as HTMLElement).closest('.uid-tab-item') as HTMLElement;
+        if (!item || dragIdx === null) return;
+        const dropIdx = parseInt(item.dataset.index!);
+        if (dragIdx !== dropIdx) {
+            const moved = config.sidebar.tabs.splice(dragIdx, 1)[0];
+            config.sidebar.tabs.splice(dropIdx, 0, moved);
+            renderSidebarTabList(config);
+            renderUIPreview(config);
+        }
+        item.classList.remove('uid-drag-over');
+    });
+    list.addEventListener('dragend', () => {
+        list.querySelectorAll('.uid-dragging').forEach(el => el.classList.remove('uid-dragging'));
+    });
+
+    // Toggle visibility
+    list.addEventListener('change', (e: Event) => {
+        const cb = e.target as HTMLInputElement;
+        if (cb.dataset.tidx !== undefined) {
+            const idx = parseInt(cb.dataset.tidx);
+            config.sidebar.tabs[idx].visible = cb.checked;
+            renderSidebarTabList(config);
+            renderUIPreview(config);
+        }
+    });
+
+    // Remove tab
+    list.addEventListener('click', (e: Event) => {
+        const btn = (e.target as HTMLElement).closest('.uid-remove-btn') as HTMLElement;
+        if (!btn || btn.dataset.ridx === undefined) return;
+        const idx = parseInt(btn.dataset.ridx);
+        const tab = config.sidebar.tabs[idx];
+        if (confirm(`Remove sidebar tab "${tab.title}"?`)) {
+            config.sidebar.tabs.splice(idx, 1);
+            renderSidebarTabList(config);
+            renderUIPreview(config);
+        }
+    });
+}
+
+function renderMenuBarList(config: UILayoutConfig) {
+    const list = document.getElementById('uid-menu-list');
+    if (!list) return;
+    list.innerHTML = '';
+
+    config.menuBar.items.forEach((item, i) => {
+        const el = document.createElement('div');
+        el.className = 'uid-menu-item';
+        el.innerHTML = `
+            <span class="uid-menu-label">${item.label}</span>
+            <button class="uid-remove-btn" data-midx-rm="${i}" title="Remove">✕</button>
+            <label class="uid-toggle"><input type="checkbox" ${item.visible ? 'checked' : ''} data-midx="${i}"><span class="uid-toggle-slider"></span></label>`;
+        list.appendChild(el);
+    });
+
+    // Add new menu button
+    const addBtn = document.createElement('div');
+    addBtn.className = 'uid-add-item';
+    addBtn.innerHTML = '<span>＋</span> Add Menu';
+    addBtn.addEventListener('click', () => {
+        const label = prompt('Menu label:', 'Tools');
+        if (!label) return;
+        const id = 'custom_' + Date.now();
+        config.menuBar.items.push({ id, label, visible: true });
+        renderMenuBarList(config);
+        renderUIPreview(config);
+    });
+    list.appendChild(addBtn);
+
+    list.addEventListener('change', (e: Event) => {
+        const cb = e.target as HTMLInputElement;
+        if (cb.dataset.midx !== undefined) {
+            config.menuBar.items[parseInt(cb.dataset.midx)].visible = cb.checked;
+            renderUIPreview(config);
+        }
+    });
+
+    list.addEventListener('click', (e: Event) => {
+        const btn = (e.target as HTMLElement).closest('[data-midx-rm]') as HTMLElement;
+        if (!btn) return;
+        const idx = parseInt(btn.dataset.midxRm!);
+        if (confirm(`Remove menu "${config.menuBar.items[idx].label}"?`)) {
+            config.menuBar.items.splice(idx, 1);
+            renderMenuBarList(config);
+            renderUIPreview(config);
+        }
+    });
+}
+
+function renderUIPreview(config: UILayoutConfig) {
+    const preview = document.getElementById('uid-preview');
+    if (!preview) return;
+
+    const sideW = Math.round(config.sidebar.defaultWidth / 4);
+    const bottomH = Math.round(config.bottomPanel.defaultHeight / 6);
+
+    const visibleTabs = config.sidebar.tabs.filter(t => t.visible);
+    const tabIcons = visibleTabs.map(t => `<div class="uidp-tab" title="${t.title}">${t.icon}</div>`).join('');
+    const menuItems = config.menuBar.items.filter(m => m.visible).map(m => `<span class="uidp-menu">${m.label}</span>`).join('');
+
+    preview.innerHTML = `
+        <div class="uidp-frame">
+            <div class="uidp-titlebar">
+                <span class="uidp-titlebar-text">Nexia IDE</span>
+                <span class="uidp-titlebar-user">user ✕</span>
+            </div>
+            <div class="uidp-menubar">${menuItems}</div>
+            <div class="uidp-body">
+                <div class="uidp-sidebar" style="width:${sideW}px">
+                    <div class="uidp-sidebar-icons">${tabIcons}</div>
+                    <div class="uidp-sidebar-panel"></div>
+                </div>
+                <div class="uidp-main">
+                    <div class="uidp-editor">
+                        <div class="uidp-welcome">
+                            <div class="uidp-welcome-logo">${config.welcome.logoEmoji}</div>
+                            <div class="uidp-welcome-title">${escapeHtml(config.welcome.title)}</div>
+                            <div class="uidp-welcome-sub">${escapeHtml(config.welcome.subtitle)}</div>
+                            <div class="uidp-welcome-btns">
+                                ${config.welcome.showNewProject ? '<span class="uidp-btn">New Project</span>' : ''}
+                                ${config.welcome.showOpenProject ? '<span class="uidp-btn">Open Project</span>' : ''}
+                            </div>
+                        </div>
+                    </div>
+                    <div class="uidp-bottom" style="height:${bottomH}px">
+                        <div class="uidp-bottom-tabs">OUTPUT</div>
+                    </div>
+                </div>
+            </div>
+            <div class="uidp-statusbar"></div>
+        </div>`;
+}
+
+function applyUILayout(config: UILayoutConfig) {
+    // Apply sidebar tab order and visibility
+    const tabContainer = document.getElementById('sidebar-tabs');
+    const sidebarContent = document.getElementById('sidebar-content');
+    if (tabContainer) {
+        const buttons = Array.from(tabContainer.querySelectorAll('.sidebar-tab')) as HTMLElement[];
+        const buttonMap = new Map<string, HTMLElement>();
+        buttons.forEach(b => buttonMap.set(b.dataset.panel!, b));
+
+        // Reorder and create missing custom tabs
+        config.sidebar.tabs.forEach(tab => {
+            let btn = buttonMap.get(tab.id);
+
+            // Create DOM elements for custom tabs that don't exist yet
+            if (!btn && tab.id.startsWith('custom_')) {
+                btn = document.createElement('button') as HTMLButtonElement;
+                btn.className = 'sidebar-tab';
+                btn.dataset.panel = tab.id;
+                btn.title = tab.title;
+                btn.textContent = tab.icon;
+                btn.addEventListener('click', () => {
+                    document.querySelectorAll('.sidebar-tab').forEach(t => t.classList.remove('active'));
+                    document.querySelectorAll('.sidebar-panel').forEach(p => p.classList.remove('active'));
+                    btn!.classList.add('active');
+                    document.getElementById(`panel-${tab.id}`)?.classList.add('active');
+                });
+                tabContainer.appendChild(btn);
+
+                // Create panel
+                if (sidebarContent && !document.getElementById(`panel-${tab.id}`)) {
+                    const panel = document.createElement('div');
+                    panel.id = `panel-${tab.id}`;
+                    panel.className = 'sidebar-panel';
+                    panel.innerHTML = `
+                        <div class="panel-header">${tab.title.toUpperCase()}</div>
+                        <div class="panel-body">
+                            <div class="git-empty" style="padding:24px 16px;text-align:center">
+                                <div class="git-empty-icon">${tab.icon}</div>
+                                <div class="git-empty-text">${tab.title}</div>
+                                <div class="git-empty-hint">Custom panel — use extensions or the API to add content here</div>
+                            </div>
+                        </div>`;
+                    sidebarContent.appendChild(panel);
+                }
+            }
+
+            if (btn) {
+                btn.style.display = tab.visible ? '' : 'none';
+                tabContainer.appendChild(btn); // moves to end = reorder
+            }
+        });
+    }
+
+    // Apply panel sizes
+    document.documentElement.style.setProperty('--sidebar-w', config.sidebar.defaultWidth + 'px');
+    document.documentElement.style.setProperty('--bottom-h', config.bottomPanel.defaultHeight + 'px');
+
+    // Apply menu bar visibility
+    config.menuBar.items.forEach(item => {
+        const menuEl = document.getElementById('menu-' + item.id) || document.getElementById('menu-' + item.id + '-menu');
+        if (menuEl) menuEl.style.display = item.visible ? '' : 'none';
+    });
+
+    // Apply welcome screen
+    const welcomeLogo = document.getElementById('welcome-logo');
+    const welcomeH1 = document.querySelector('#welcome-content h1');
+    const welcomeP = document.querySelector('#welcome-content > p');
+    if (welcomeLogo) welcomeLogo.textContent = config.welcome.logoEmoji;
+    if (welcomeH1) welcomeH1.textContent = config.welcome.title;
+    if (welcomeP) welcomeP.textContent = config.welcome.subtitle;
+    const welcomeNew = document.getElementById('welcome-new');
+    const welcomeOpen = document.getElementById('welcome-open');
+    if (welcomeNew) welcomeNew.style.display = config.welcome.showNewProject ? '' : 'none';
+    if (welcomeOpen) welcomeOpen.style.display = config.welcome.showOpenProject ? '' : 'none';
+}
+
+// ══════════════════════════════════════
+//  MARKETPLACE (Developer Panel tab)
+// ══════════════════════════════════════
+
+let _settingsPanelOpen = false;
+
+function showSettingsPanel() {
+    if (_settingsPanelOpen) { closeSettingsPanel(); return; }
+    _settingsPanelOpen = true;
+
+    const overlay = document.createElement('div');
+    overlay.id = 'settings-panel-overlay';
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:9998;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;opacity:0;transition:opacity 0.2s;';
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) closeSettingsPanel(); });
+    document.body.appendChild(overlay);
+
+    const win = document.createElement('div');
+    win.id = 'settings-panel-window';
+    win.style.cssText = 'display:flex;width:760px;max-width:90vw;height:560px;max-height:85vh;background:var(--bg-panel);border:1px solid var(--border);border-radius:10px;box-shadow:0 20px 60px rgba(0,0,0,0.5);overflow:hidden;font-family:var(--font);';
+
+    // Sidebar
+    const sidebar = document.createElement('div');
+    sidebar.style.cssText = 'width:180px;background:var(--bg-dark);border-right:1px solid var(--border);padding:16px 0;display:flex;flex-direction:column;flex-shrink:0;';
+    sidebar.innerHTML = `
+        <style>
+            .sp-nav-item { display:flex;align-items:center;gap:8px;width:100%;padding:8px 16px;border:none;background:transparent;color:var(--text-dim);font-size:12px;cursor:pointer;text-align:left;font-family:var(--font);transition:background 0.15s,color 0.15s; }
+            .sp-nav-item:hover { background:var(--bg-hover);color:var(--text); }
+            .sp-nav-item.active { background:var(--bg-input);color:var(--text);font-weight:600;border-left:2px solid var(--accent); }
+        </style>
+        <div style="padding:0 16px 16px;font-size:14px;font-weight:600;color:var(--text);">⚙ Settings</div>
+        <div class="sp-nav" id="sp-nav">
+            <button class="sp-nav-item active" data-section="editor">📝 Editor</button>
+            <button class="sp-nav-item" data-section="appearance">🎨 Appearance</button>
+            <button class="sp-nav-item" data-section="layout">📐 Layout</button>
+            <button class="sp-nav-item" data-section="ai">🤖 AI Assistant</button>
+            <button class="sp-nav-item" data-section="accounts">🔗 Accounts</button>
+            <button class="sp-nav-item" data-section="advanced">⚡ Advanced</button>
+        </div>
+        <div style="flex:1;"></div>
+        <div style="padding:8px 16px;">
+            <button id="sp-done" style="width:100%;padding:8px 0;background:var(--accent);color:#1e1e1e;border:none;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;font-family:var(--font);">Done</button>
+        </div>
+    `;
+    win.appendChild(sidebar);
+
+    // Content
+    const content = document.createElement('div');
+    content.id = 'sp-content';
+    content.style.cssText = 'flex:1;overflow-y:auto;padding:24px 28px;';
+    win.appendChild(content);
+
+    overlay.appendChild(win);
+    requestAnimationFrame(() => { overlay.style.opacity = '1'; });
+
+    // Wire nav
+    sidebar.querySelector('#sp-nav')!.addEventListener('click', (e) => {
+        const btn = (e.target as HTMLElement).closest('.sp-nav-item') as HTMLElement;
+        if (!btn) return;
+        sidebar.querySelectorAll('.sp-nav-item').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        renderSettingsSection(content, btn.dataset.section!);
+    });
+
+    sidebar.querySelector('#sp-done')!.addEventListener('click', () => closeSettingsPanel());
+
+    // Escape key
+    const escHandler = (e: KeyboardEvent) => {
+        if (e.key === 'Escape') { closeSettingsPanel(); document.removeEventListener('keydown', escHandler); }
+    };
+    document.addEventListener('keydown', escHandler);
+
+    // Render default section
+    renderSettingsSection(content, 'editor');
+}
+
+function closeSettingsPanel() {
+    _settingsPanelOpen = false;
+    // Save AI settings before closing
+    saveSettingsFromUI();
+    const overlay = document.getElementById('settings-panel-overlay');
+    if (overlay) {
+        overlay.style.opacity = '0';
+        setTimeout(() => overlay.remove(), 200);
+    }
+}
+
+function saveSettingsFromUI() {
+    const get = (id: string) => document.getElementById(id);
+    const providerSel = get('sp-ai-provider') as HTMLSelectElement;
+    if (providerSel) userSettings.aiProvider = providerSel.value as any;
+    const apiKeyInput = get('sp-ai-key') as HTMLInputElement;
+    if (apiKeyInput) userSettings.aiApiKey = apiKeyInput.value;
+    const endpointInput = get('sp-ai-endpoint') as HTMLInputElement;
+    if (endpointInput) userSettings.aiEndpoint = endpointInput.value;
+    const modelInput = get('sp-ai-model') as HTMLInputElement;
+    if (modelInput) userSettings.aiModel = modelInput.value.trim();
+    const sysPrompt = get('sp-ai-system') as HTMLTextAreaElement;
+    if (sysPrompt) userSettings.aiSystemPrompt = sysPrompt.value;
+    const autoErrors = get('sp-ai-auto-errors') as HTMLInputElement;
+    if (autoErrors) userSettings.aiAutoErrors = autoErrors.checked;
+    const inlineSuggest = get('sp-ai-inline') as HTMLInputElement;
+    if (inlineSuggest) userSettings.aiInlineSuggest = inlineSuggest.checked;
+    const fileCtx = get('sp-ai-filectx') as HTMLInputElement;
+    if (fileCtx) userSettings.aiFileContext = fileCtx.checked;
     saveUserSettings();
-});
+}
 
-// Fancy effects toggle
-document.addEventListener('change', (e) => {
-    const target = e.target as HTMLInputElement;
-    if (target.id === 'setting-fancy-effects') {
-        userSettings.fancyEffects = target.checked;
-        applyFancyMode();
-        saveUserSettings();
-    }
-});
-
-// Theme presets
 const PRESETS: Record<string, Partial<UserSettings>> = {
     xbox:   { accentColor: '#4ec9b0', bgDark: '#181818', bgMain: '#1e1e1e', bgPanel: '#1e1e1e', bgSidebar: '#252526', editorBg: '#1e1e1e', textColor: '#cccccc', textDim: '#858585' },
     red:    { accentColor: '#f14c4c', bgDark: '#1c1616', bgMain: '#221a1a', bgPanel: '#221a1a', bgSidebar: '#2a2020', editorBg: '#221a1a', textColor: '#d4c8c8', textDim: '#8a7070' },
-    blue:   { accentColor: '#4fc1ff', bgDark: '#16181c', bgMain: '#1a1e24', bgPanel: '#1a1e24', bgSidebar: '#20242a', editorBg: '#1a1e24', textColor: '#ccd0d8', textDim: '#6878889' },
+    blue:   { accentColor: '#4fc1ff', bgDark: '#16181c', bgMain: '#1a1e24', bgPanel: '#1a1e24', bgSidebar: '#20242a', editorBg: '#1a1e24', textColor: '#ccd0d8', textDim: '#687888' },
     purple: { accentColor: '#c586c0', bgDark: '#1c1620', bgMain: '#221a26', bgPanel: '#221a26', bgSidebar: '#28202e', editorBg: '#221a26', textColor: '#d4ccd8', textDim: '#8a7090' },
     orange: { accentColor: '#ce9178', bgDark: '#1c1816', bgMain: '#241e1a', bgPanel: '#241e1a', bgSidebar: '#2a2420', editorBg: '#241e1a', textColor: '#d8d0c8', textDim: '#8a7868' },
     mono:   { accentColor: '#cccccc', bgDark: '#141414', bgMain: '#1a1a1a', bgPanel: '#1a1a1a', bgSidebar: '#222222', editorBg: '#1a1a1a', textColor: '#d4d4d4', textDim: '#808080' },
 };
 
-document.addEventListener('click', (e) => {
-    const target = e.target as HTMLElement;
-    const preset = target.dataset?.preset || target.closest('[data-preset]')?.getAttribute('data-preset');
-    if (preset && PRESETS[preset]) {
-        Object.assign(userSettings, PRESETS[preset]);
-        saveUserSettings();
-        applyThemeColors();
-        showSettingsPanel(); // refresh color inputs
+function renderSettingsSection(container: HTMLElement, section: string) {
+    // Save AI settings before switching sections so nothing is lost
+    saveSettingsFromUI();
+
+    const s = userSettings;
+    const row = (label: string, input: string) => `<div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;"><label style="font-size:13px;color:var(--text);">${label}</label>${input}</div>`;
+    const toggle = (id: string, checked: boolean) => `<label class="toggle-switch"><input type="checkbox" id="${id}" ${checked ? 'checked' : ''}><span class="toggle-slider"></span></label>`;
+    const colorInput = (key: string, val: string) => `<input type="color" data-setting="${key}" value="${val || '#1e1e1e'}" style="width:36px;height:24px;border:1px solid var(--border);background:var(--bg-input);cursor:pointer;padding:1px;border-radius:var(--radius-sm);">`;
+    const sectionTitle = (title: string) => `<div style="font-size:11px;color:var(--text-dim);letter-spacing:0.04em;margin:16px 0 8px;text-transform:uppercase;font-weight:700;">${title}</div>`;
+
+    switch (section) {
+        case 'editor':
+            container.innerHTML = `
+                <h2 style="font-size:18px;font-weight:600;color:var(--text);margin:0 0 20px;">Editor</h2>
+                ${sectionTitle('Font')}
+                ${row('Font Size', `<input type="number" id="sp-fontsize" data-setting="fontSize" min="8" max="40" value="${s.fontSize}" style="width:60px;padding:3px 6px;background:var(--bg-input);border:1px solid var(--border);color:var(--text);font-family:var(--mono);font-size:13px;text-align:center;border-radius:var(--radius-sm);">`)}
+            `;
+            container.querySelector('#sp-fontsize')!.addEventListener('input', (e) => {
+                const v = parseInt((e.target as HTMLInputElement).value) || 14;
+                userSettings.fontSize = Math.max(8, Math.min(40, v));
+                if (editor) editor.updateOptions({ fontSize: userSettings.fontSize });
+                $('status-zoom').textContent = `${Math.round((userSettings.fontSize / 14) * 100)}%`;
+                saveUserSettings();
+            });
+            break;
+
+        case 'appearance':
+            container.innerHTML = `
+                <h2 style="font-size:18px;font-weight:600;color:var(--text);margin:0 0 20px;">Appearance</h2>
+                ${sectionTitle('Visual Effects')}
+                ${row('Fancy Mode', toggle('sp-fancy', s.fancyEffects))}
+                <div style="font-size:11px;color:var(--text-muted);margin:2px 0 12px;">Glassmorphism, glow effects, animations, floating orbs, and decorative shadows.</div>
+                ${sectionTitle('Theme Colors')}
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 24px;">
+                    ${row('Accent Color', colorInput('accentColor', s.accentColor))}
+                    ${row('Background (Dark)', colorInput('bgDark', s.bgDark))}
+                    ${row('Background (Main)', colorInput('bgMain', s.bgMain))}
+                    ${row('Panel Background', colorInput('bgPanel', s.bgPanel))}
+                    ${row('Sidebar Background', colorInput('bgSidebar', s.bgSidebar))}
+                    ${row('Editor Background', colorInput('editorBg', s.editorBg))}
+                    ${row('Text Color', colorInput('textColor', s.textColor))}
+                    ${row('Text (Dim)', colorInput('textDim', s.textDim))}
+                </div>
+                ${sectionTitle('Presets')}
+                <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                    <button class="preset-btn" data-preset="xbox" style="padding:6px 12px;border:1px solid var(--border);background:var(--bg-input);color:var(--text);border-radius:var(--radius-sm);cursor:pointer;font-size:12px;">🟢 Xbox Green</button>
+                    <button class="preset-btn" data-preset="red" style="padding:6px 12px;border:1px solid var(--border);background:var(--bg-input);color:var(--text);border-radius:var(--radius-sm);cursor:pointer;font-size:12px;">🔴 Red Ring</button>
+                    <button class="preset-btn" data-preset="blue" style="padding:6px 12px;border:1px solid var(--border);background:var(--bg-input);color:var(--text);border-radius:var(--radius-sm);cursor:pointer;font-size:12px;">🔵 Blue Steel</button>
+                    <button class="preset-btn" data-preset="purple" style="padding:6px 12px;border:1px solid var(--border);background:var(--bg-input);color:var(--text);border-radius:var(--radius-sm);cursor:pointer;font-size:12px;">🟣 Purple Haze</button>
+                    <button class="preset-btn" data-preset="orange" style="padding:6px 12px;border:1px solid var(--border);background:var(--bg-input);color:var(--text);border-radius:var(--radius-sm);cursor:pointer;font-size:12px;">🟠 Sunset</button>
+                    <button class="preset-btn" data-preset="mono" style="padding:6px 12px;border:1px solid var(--border);background:var(--bg-input);color:var(--text);border-radius:var(--radius-sm);cursor:pointer;font-size:12px;">⚪ Mono</button>
+                </div>
+            `;
+            container.querySelector('#sp-fancy')!.addEventListener('change', (e) => {
+                userSettings.fancyEffects = (e.target as HTMLInputElement).checked;
+                applyFancyMode();
+                saveUserSettings();
+            });
+            // Live color updates
+            container.querySelectorAll('input[type="color"]').forEach(inp => {
+                inp.addEventListener('input', (e) => {
+                    const t = e.target as HTMLInputElement;
+                    const key = t.dataset.setting as keyof UserSettings;
+                    if (key) (userSettings as any)[key] = t.value;
+                    applyThemeColors();
+                    saveUserSettings();
+                });
+            });
+            // Presets
+            container.querySelectorAll('.preset-btn').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    const p = (btn as HTMLElement).dataset.preset;
+                    if (p && PRESETS[p]) {
+                        Object.assign(userSettings, PRESETS[p]);
+                        saveUserSettings();
+                        applyThemeColors();
+                        renderSettingsSection(container, 'appearance');
+                    }
+                });
+            });
+            break;
+
+        case 'layout':
+            const currentLayout = s.layout || 'sidebar-left';
+            container.innerHTML = `
+                <h2 style="font-size:18px;font-weight:600;color:var(--text);margin:0 0 20px;">Layout</h2>
+                ${sectionTitle('Window Layout')}
+                <div class="layout-grid">
+                    <div class="layout-option ${currentLayout === 'sidebar-left' ? 'active' : ''}" data-layout="sidebar-left">
+                        <div class="layout-preview"><div class="lp-sidebar lp-left"></div><div class="lp-main"></div></div>
+                        <span>Sidebar Left</span>
+                    </div>
+                    <div class="layout-option ${currentLayout === 'sidebar-right' ? 'active' : ''}" data-layout="sidebar-right">
+                        <div class="layout-preview"><div class="lp-main"></div><div class="lp-sidebar lp-right"></div></div>
+                        <span>Sidebar Right</span>
+                    </div>
+                    <div class="layout-option ${currentLayout === 'bottom-panel' ? 'active' : ''}" data-layout="bottom-panel">
+                        <div class="layout-preview"><div class="lp-main"></div><div class="lp-bottom"></div></div>
+                        <span>Bottom Panel</span>
+                    </div>
+                    <div class="layout-option ${currentLayout === 'ai-right' ? 'active' : ''}" data-layout="ai-right">
+                        <div class="layout-preview"><div class="lp-sidebar lp-left"></div><div class="lp-main"></div><div class="lp-ai-panel"></div></div>
+                        <span>AI Side Panel</span>
+                    </div>
+                </div>
+                ${sectionTitle('Borders & Spacing')}
+                ${row('Corner Rounding', `<select id="sp-corner" style="padding:4px 8px;background:var(--bg-input);border:1px solid var(--border);color:var(--text);border-radius:var(--radius-sm);font-size:12px;">
+                    <option value="sharp" ${s.cornerRadius === 'sharp' ? 'selected' : ''}>Sharp (0px)</option>
+                    <option value="subtle" ${s.cornerRadius === 'subtle' ? 'selected' : ''}>Subtle (4px)</option>
+                    <option value="rounded" ${(!s.cornerRadius || s.cornerRadius === 'rounded') ? 'selected' : ''}>Rounded (8px)</option>
+                    <option value="pill" ${s.cornerRadius === 'pill' ? 'selected' : ''}>Pill (12px)</option>
+                </select>`)}
+                ${row('Compact Mode', toggle('sp-compact', s.compactMode || false))}
+            `;
+            container.querySelectorAll('.layout-option').forEach(opt => {
+                opt.addEventListener('click', () => {
+                    container.querySelectorAll('.layout-option').forEach(o => o.classList.remove('active'));
+                    opt.classList.add('active');
+                    userSettings.layout = (opt as HTMLElement).dataset.layout!;
+                    applyLayout();
+                    saveUserSettings();
+                });
+            });
+            container.querySelector('#sp-corner')!.addEventListener('change', (e) => {
+                userSettings.cornerRadius = (e.target as HTMLSelectElement).value;
+                applyCornerRadius();
+                saveUserSettings();
+            });
+            container.querySelector('#sp-compact')!.addEventListener('change', (e) => {
+                userSettings.compactMode = (e.target as HTMLInputElement).checked;
+                applyCompactMode();
+                saveUserSettings();
+            });
+            break;
+
+        case 'ai':
+            const showEndpoint = s.aiProvider === 'custom' || s.aiProvider === 'local';
+            container.innerHTML = `
+                <h2 style="font-size:18px;font-weight:600;color:var(--text);margin:0 0 20px;">AI Assistant</h2>
+                ${sectionTitle('Provider')}
+                <div style="margin-bottom:10px;">
+                    <select id="sp-ai-provider" style="width:100%;padding:6px 10px;background:var(--bg-input);border:1px solid var(--border);color:var(--text);border-radius:var(--radius-sm);font-size:13px;">
+                        <option value="anthropic" ${s.aiProvider === 'anthropic' ? 'selected' : ''}>Anthropic (Claude)</option>
+                        <option value="openai" ${s.aiProvider === 'openai' ? 'selected' : ''}>OpenAI (GPT)</option>
+                        <option value="local" ${s.aiProvider === 'local' ? 'selected' : ''}>Local / Ollama</option>
+                        <option value="custom" ${s.aiProvider === 'custom' ? 'selected' : ''}>Custom Endpoint</option>
+                    </select>
+                </div>
+                ${sectionTitle('API Key')}
+                <div style="display:flex;gap:8px;margin-bottom:10px;">
+                    <input type="password" id="sp-ai-key" value="${escapeHtml(s.aiApiKey || '')}" placeholder="sk-... or your API key" style="flex:1;padding:6px 10px;background:var(--bg-input);border:1px solid var(--border);color:var(--text);border-radius:var(--radius-sm);font-size:13px;">
+                    <button id="sp-ai-key-toggle" style="padding:6px 12px;background:var(--bg-input);border:1px solid var(--border);color:var(--text);border-radius:var(--radius-sm);cursor:pointer;font-size:12px;">Show</button>
+                </div>
+                <div id="sp-ai-endpoint-row" style="margin-bottom:10px;${showEndpoint ? '' : 'display:none;'}">
+                    <div style="font-size:11px;color:var(--text-dim);margin-bottom:4px;">Custom Endpoint</div>
+                    <input type="text" id="sp-ai-endpoint" value="${escapeHtml(s.aiEndpoint || '')}" placeholder="http://localhost:11434/v1/chat/completions" style="width:100%;padding:6px 10px;background:var(--bg-input);border:1px solid var(--border);color:var(--text);border-radius:var(--radius-sm);font-size:13px;box-sizing:border-box;">
+                </div>
+                ${sectionTitle('Model')}
+                <input type="text" id="sp-ai-model" value="${escapeHtml(s.aiModel || '')}" placeholder="Leave blank for default" style="width:100%;padding:6px 10px;background:var(--bg-input);border:1px solid var(--border);color:var(--text);border-radius:var(--radius-sm);font-size:13px;margin-bottom:10px;box-sizing:border-box;">
+                ${sectionTitle('System Context')}
+                <textarea id="sp-ai-system" rows="3" placeholder="Custom instructions (optional)" style="width:100%;padding:6px 10px;background:var(--bg-input);border:1px solid var(--border);color:var(--text);border-radius:var(--radius-sm);font-size:13px;resize:vertical;margin-bottom:12px;box-sizing:border-box;font-family:var(--font);">${escapeHtml(s.aiSystemPrompt || '')}</textarea>
+                ${sectionTitle('Behavior')}
+                ${row('Auto-analyze build errors', toggle('sp-ai-auto-errors', s.aiAutoErrors !== false))}
+                ${row('Inline code suggestions', toggle('sp-ai-inline', s.aiInlineSuggest || false))}
+                ${row('Include open file as context', toggle('sp-ai-filectx', s.aiFileContext !== false))}
+                <div style="margin-top:12px;">
+                    <button id="sp-ai-test" style="padding:6px 14px;background:var(--bg-input);border:1px solid var(--border);color:var(--text);border-radius:var(--radius-sm);cursor:pointer;font-size:12px;">🔌 Test Connection</button>
+                </div>
+            `;
+            container.querySelector('#sp-ai-provider')!.addEventListener('change', (e) => {
+                const v = (e.target as HTMLSelectElement).value;
+                const epRow = document.getElementById('sp-ai-endpoint-row');
+                if (epRow) epRow.style.display = (v === 'custom' || v === 'local') ? '' : 'none';
+            });
+            container.querySelector('#sp-ai-key-toggle')!.addEventListener('click', () => {
+                const inp = document.getElementById('sp-ai-key') as HTMLInputElement;
+                const btn = document.getElementById('sp-ai-key-toggle') as HTMLButtonElement;
+                if (inp.type === 'password') { inp.type = 'text'; btn.textContent = 'Hide'; }
+                else { inp.type = 'password'; btn.textContent = 'Show'; }
+            });
+            container.querySelector('#sp-ai-test')!.addEventListener('click', async () => {
+                const btn = document.getElementById('sp-ai-test') as HTMLButtonElement;
+                saveSettingsFromUI();
+                btn.disabled = true; btn.textContent = '⏳ Testing...';
+                try {
+                    await aiComplete([{ role: 'user', content: 'Say "connected" and nothing else.' }]);
+                    btn.textContent = '✅ Connected!';
+                } catch (err: any) {
+                    btn.textContent = `❌ ${(err.message || 'Failed').substring(0, 40)}`;
+                }
+                setTimeout(() => { btn.disabled = false; btn.textContent = '🔌 Test Connection'; }, 3000);
+            });
+            break;
+
+        case 'accounts':
+            container.innerHTML = `
+                <h2 style="font-size:18px;font-weight:600;color:var(--text);margin:0 0 20px;">Connected Accounts</h2>
+                <div style="display:flex;flex-direction:column;gap:10px;" id="sp-accounts"></div>
+            `;
+            renderAccountRows(container.querySelector('#sp-accounts')!);
+            break;
+
+        case 'advanced':
+            container.innerHTML = `
+                <h2 style="font-size:18px;font-weight:600;color:var(--text);margin:0 0 20px;">Advanced</h2>
+                ${sectionTitle('SDK')}
+                <button id="sp-sdk-setup" style="padding:8px 16px;background:var(--bg-input);border:1px solid var(--border);color:var(--text);border-radius:var(--radius-sm);cursor:pointer;font-size:12px;width:100%;text-align:left;">🔧 SDK Setup...</button>
+                ${sectionTitle('Tour')}
+                <button id="sp-retake-tour" style="padding:8px 16px;background:var(--bg-input);border:1px solid var(--border);color:var(--text);border-radius:var(--radius-sm);cursor:pointer;font-size:12px;width:100%;text-align:left;">🎓 Retake UI Tour</button>
+                ${sectionTitle('Reset')}
+                <div style="display:flex;flex-direction:column;gap:8px;">
+                    <button id="sp-reset-theme" style="padding:8px 16px;background:var(--bg-input);border:1px solid var(--border);color:var(--text);border-radius:var(--radius-sm);cursor:pointer;font-size:12px;text-align:left;">🎨 Reset Theme to Default</button>
+                    <button id="sp-reset-learning" style="padding:8px 16px;background:var(--bg-input);border:1px solid #e5c07b;color:#e5c07b;border-radius:var(--radius-sm);cursor:pointer;font-size:12px;text-align:left;">📚 Reset Learning Progress</button>
+                    <button id="sp-factory-reset" style="padding:8px 16px;background:var(--bg-input);border:1px solid #f14c4c;color:#f14c4c;border-radius:var(--radius-sm);cursor:pointer;font-size:12px;text-align:left;">⚠ Factory Reset Everything</button>
+                </div>
+            `;
+            container.querySelector('#sp-sdk-setup')!.addEventListener('click', () => { closeSettingsPanel(); $('setup-overlay').classList.remove('hidden'); });
+            container.querySelector('#sp-retake-tour')!.addEventListener('click', () => { closeSettingsPanel(); setTimeout(() => startTour(), 300); });
+            container.querySelector('#sp-reset-theme')!.addEventListener('click', () => {
+                userSettings = { ...DEFAULT_SETTINGS };
+                saveUserSettings(); applyThemeColors(); applyFancyMode(); applyLayout(); applyCornerRadius(); applyCompactMode();
+                if (editor) editor.updateOptions({ fontSize: userSettings.fontSize });
+                $('status-zoom').textContent = '100%';
+                renderSettingsSection(container, 'advanced');
+                appendOutput('Theme reset to defaults.\n');
+            });
+            container.querySelector('#sp-reset-learning')!.addEventListener('click', () => {
+                if (!confirm('Reset all learning progress?')) return;
+                userProfile = { ...DEFAULT_PROFILE }; saveProfile(); renderLearnPanel(); renderTipsPanel();
+                appendOutput('Learning progress reset.\n');
+            });
+            container.querySelector('#sp-factory-reset')!.addEventListener('click', () => {
+                if (!confirm('Factory reset EVERYTHING?')) return;
+                userSettings = { ...DEFAULT_SETTINGS }; saveUserSettings(); applyThemeColors(); applyFancyMode();
+                if (editor) editor.updateOptions({ fontSize: 14 }); $('status-zoom').textContent = '100%';
+                userProfile = { ...DEFAULT_PROFILE }; saveProfile(); renderLearnPanel(); renderTipsPanel();
+                closeSettingsPanel();
+                appendOutput('Factory reset complete.\n');
+            });
+            break;
     }
-});
+}
+
+function renderAccountRows(container: HTMLElement) {
+    const _discUser = getDiscordAuthUser();
+    const ghConfigFile = nodePath.join(nodeOs.homedir(), '.nexia-ide-github.json');
+    let ghData: any = null;
+    try { if (nodeFs.existsSync(ghConfigFile)) ghData = JSON.parse(nodeFs.readFileSync(ghConfigFile, 'utf-8')); } catch {}
+
+    const accountRow = (icon: string, name: string, status: string, statusColor: string, connected: boolean, btnId: string) => `
+        <div style="display:flex;align-items:center;gap:12px;padding:12px 14px;background:var(--bg-input);border-radius:8px;">
+            <div style="font-size:20px;flex-shrink:0;">${icon}</div>
+            <div style="flex:1;">
+                <div style="font-size:13px;font-weight:500;color:var(--text);">${name}</div>
+                <div style="font-size:11px;color:${statusColor};">${status}</div>
+            </div>
+            <button id="${btnId}" style="padding:6px 14px;background:${connected ? 'transparent' : 'var(--accent)'};color:${connected ? 'var(--text-dim)' : '#1e1e1e'};border:1px solid ${connected ? 'var(--border)' : 'var(--accent)'};border-radius:6px;cursor:pointer;font-size:12px;font-weight:500;">${connected ? 'Disconnect' : 'Connect'}</button>
+        </div>`;
+
+    const discordIcon = `<svg viewBox="0 0 24 24" width="22" height="22" fill="#5865F2"><path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028c.462-.63.874-1.295 1.226-1.994a.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128c.125-.093.25-.19.372-.292a.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419s.956-2.419 2.157-2.419c1.21 0 2.176 1.095 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419s.956-2.419 2.157-2.419c1.21 0 2.176 1.095 2.157 2.42 0 1.333-.947 2.418-2.157 2.418z"/></svg>`;
+    const githubIcon = `<svg viewBox="0 0 16 16" width="22" height="22" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>`;
+
+    container.innerHTML =
+        accountRow(discordIcon, 'Discord', _discUser ? _discUser.username : 'Not connected', _discUser ? '#5865F2' : 'var(--text-dim)', !!_discUser, 'sp-discord-btn') +
+        accountRow(githubIcon, 'GitHub', ghData?.username || 'Not connected', ghData?.token ? '#4ade80' : 'var(--text-dim)', !!ghData?.token, 'sp-github-btn');
+
+    // Wire Discord
+    document.getElementById('sp-discord-btn')!.addEventListener('click', async () => {
+        if (_discUser) {
+            await ipcRenderer.invoke(IPC.DISCORD_AUTH_LOGOUT);
+            setDiscordAuthUser(null);
+            saveUserSettings();
+            renderAccountRows(container);
+        } else {
+            const btn = document.getElementById('sp-discord-btn') as HTMLButtonElement;
+            btn.textContent = 'Connecting...'; btn.disabled = true;
+            const result = await ipcRenderer.invoke(IPC.DISCORD_AUTH_START);
+            if (result.success) {
+                const authResult = await ipcRenderer.invoke(IPC.DISCORD_AUTH_USER);
+                if (authResult.loggedIn) setDiscordAuthUser({ id: authResult.id, username: authResult.username, avatarUrl: authResult.avatarUrl });
+                saveUserSettings();
+            }
+            renderAccountRows(container);
+        }
+    });
+
+    // Wire GitHub
+    document.getElementById('sp-github-btn')!.addEventListener('click', () => {
+        if (ghData?.token) {
+            try { nodeFs.unlinkSync(ghConfigFile); } catch {}
+            saveUserSettings(); renderGitPanel();
+            renderAccountRows(container);
+        } else {
+            closeSettingsPanel();
+            const gitTab = document.querySelector('.sidebar-tab[data-panel="git"]') as HTMLElement;
+            if (gitTab) gitTab.click();
+        }
+    });
+}
 
 // ══════════════════════════════════════
 //  ONBOARDING WIZARD
@@ -3117,9 +3457,60 @@ function finishOnboarding() {
 }
 
 // Wire onboarding buttons
-$('ob-next-1').addEventListener('click', () => setOnboardingStep(2));
-$('ob-next-3').addEventListener('click', () => { finishOnboarding(); setTimeout(() => startTour(), 400); });
+$('ob-next-1').addEventListener('click', () => {
+    // If already signed in from stored token, skip the auth step
+    if (authService.isLoggedIn()) {
+        setOnboardingStep(3);
+    } else {
+        setOnboardingStep(2);
+    }
+});
+
+// Step 2: Account sign in / register / skip
+$('ob-signin').addEventListener('click', () => {
+    authUI.showLogin();
+    // Listen for successful auth to update the onboarding UI
+    const unsub = authService.onAuthStateChange((user: any) => {
+        if (user) {
+            updateOnboardingAuthStatus(user);
+            unsub();
+        }
+    });
+});
+$('ob-register').addEventListener('click', () => {
+    authUI.showRegister();
+    const unsub = authService.onAuthStateChange((user: any) => {
+        if (user) {
+            updateOnboardingAuthStatus(user);
+            unsub();
+        }
+    });
+});
+$('ob-skip-auth').addEventListener('click', () => setOnboardingStep(3));
+
+$('ob-next-4').addEventListener('click', () => { finishOnboarding(); setTimeout(() => startTour(), 400); });
 $('ob-skip').addEventListener('click', () => finishOnboarding());
+
+function updateOnboardingAuthStatus(user: any) {
+    const statusEl = document.getElementById('ob-auth-status');
+    const buttonsEl = document.getElementById('ob-auth-buttons');
+    const skipEl = document.getElementById('ob-skip-auth');
+    if (statusEl && user) {
+        statusEl.style.display = 'block';
+        const initials = (user.username || user.email || '?').substring(0, 2).toUpperCase();
+        const color = user.role === 'admin' ? '#e5c07b' : '#4ec9b0';
+        document.getElementById('ob-auth-avatar')!.style.background = color;
+        document.getElementById('ob-auth-avatar')!.textContent = initials;
+        document.getElementById('ob-auth-name')!.textContent = user.username;
+        document.getElementById('ob-auth-role')!.textContent = user.role.toUpperCase();
+        document.getElementById('ob-auth-role')!.style.color = color;
+    }
+    if (buttonsEl) buttonsEl.style.display = 'none';
+    if (skipEl) {
+        skipEl.textContent = 'Continue →';
+        skipEl.className = 'ob-btn-primary';
+    }
+}
 
 // Skill level selection
 document.querySelectorAll('.ob-skill-card').forEach(card => {
@@ -3130,7 +3521,7 @@ document.querySelectorAll('.ob-skill-card').forEach(card => {
         userProfile.tipsEnabled = userProfile.skillLevel !== 'expert';
         saveProfile();
         // Auto-advance after a short delay
-        setTimeout(() => setOnboardingStep(3), 400);
+        setTimeout(() => setOnboardingStep(4), 400);
     });
 });
 
@@ -3149,8 +3540,8 @@ interface TourStep {
 const TOUR_STEPS: TourStep[] = [
     {
         target: '#titlebar',
-        icon: '🪟', title: 'Title Bar & Window Controls',
-        body: 'The title bar shows your current project name. Use the minimize, maximize, and close buttons on the right — or drag anywhere to move the window.',
+        icon: '🪟', title: 'Title Bar & Account',
+        body: 'The title bar shows your project name. On the right, click your avatar to access Settings and sign out. Your Nexia account syncs settings, AI config, and linked accounts across devices.',
         position: 'bottom',
     },
     {
@@ -3161,31 +3552,92 @@ const TOUR_STEPS: TourStep[] = [
     },
     {
         target: '#toolbar',
-        icon: '🔧', title: 'Toolbar',
-        body: 'Your quick-access buttons. Build (F7), Rebuild, Clean, and Deploy to Devkit are all one click away. The dropdown selects Debug, Release, or Profile configuration.',
+        icon: '🔧', title: 'Build Toolbar',
+        body: 'One-click Build (F7), Rebuild, Clean, and Deploy to Devkit. The dropdown selects Debug, Release, or Profile configuration. Build output appears in the Output panel below.',
         position: 'bottom',
     },
     {
         target: '#sidebar',
-        icon: '📁', title: 'Sidebar — Explorer',
-        body: 'Your project\'s file tree. Click files to open them in the editor. Right-click for Rename, Delete, and New File options. The tabs switch between Explorer, Search, Extensions, Devkit, and Learn.',
+        icon: '📁', title: 'Explorer & File Tree',
+        body: 'Your project\'s file tree with Header Files and Source Files grouped automatically. Right-click for Rename, Delete, and New File. Drag files to reorganize. Use the toolbar buttons to create files, refresh, collapse all, or close the project.',
         position: 'right',
         setup: () => {
-            // Make sure explorer tab is active
             const expTab = document.querySelector('[data-panel="explorer"]') as HTMLElement;
             if (expTab) expTab.click();
         },
     },
     {
+        target: '[data-panel="search"]',
+        icon: '🔍', title: 'Find in Files',
+        body: 'Search across your entire project with regex support. Click any result to jump straight to that line. Great for tracking down function definitions, usages, or TODOs.',
+        position: 'right',
+    },
+    {
+        target: '[data-panel="ai"]',
+        icon: '🤖', title: 'Nexia AI Assistant',
+        body: 'Your AI-powered coding companion. Chat mode for questions, Generate mode for code creation, and Errors mode for automatic build error analysis. Supports Anthropic, OpenAI, and local models. Configure your API key in Settings.',
+        position: 'right',
+        setup: () => {
+            const aiTab = document.querySelector('[data-panel="ai"]') as HTMLElement;
+            if (aiTab) aiTab.click();
+        },
+    },
+    {
+        target: '[data-panel="extensions"]',
+        icon: '🏪', title: 'Marketplace',
+        body: 'The Nexia Marketplace will let you browse and install extensions, themes, and lesson packages. This feature is coming soon — stay tuned for community-created content!',
+        position: 'right',
+    },
+    {
+        target: '[data-panel="git"]',
+        icon: '🔀', title: 'Source Control & GitHub',
+        body: 'Manage Git repositories and connect your GitHub account to push/pull code, browse repos, and manage files — all from within the IDE. Sign in to your Nexia account first to enable GitHub integration.',
+        position: 'right',
+    },
+    {
+        target: '[data-panel="devkit"]',
+        icon: '📡', title: 'Dev Kit Manager',
+        body: 'Connect to your Xbox 360 development kit by entering its IP address. Once connected, you can deploy builds, browse the console\'s file system, capture screenshots, view system info, and reboot — all remotely.',
+        position: 'right',
+    },
+    {
+        target: '[data-panel="emulator"]',
+        icon: '🎮', title: 'Nexia 360 Emulator',
+        body: 'Launch and debug your XEX files in the Nexia 360 emulator. Set breakpoints, step through code, and inspect memory. Note: Emulation requires Windows 10 or later.',
+        position: 'right',
+    },
+    {
+        target: '[data-panel="learn"]',
+        icon: '🎓', title: 'Learn & Curriculum',
+        body: 'A guided curriculum that walks you through Xbox 360 development step by step — from initializing Direct3D to building full games. Track your progress, earn achievements, and unlock new challenges.',
+        position: 'right',
+        setup: () => {
+            const learnTab = document.querySelector('[data-panel="learn"]') as HTMLElement;
+            if (learnTab) learnTab.click();
+        },
+    },
+    {
+        target: '[data-panel="study"]',
+        icon: '📝', title: 'Study & Quizzes',
+        body: 'Test your knowledge with quizzes on Xbox 360 development topics. Review flashcards, track mastery levels, and reinforce what you\'ve learned from the curriculum.',
+        position: 'right',
+    },
+    {
+        target: '[data-panel="community"]',
+        icon: '💬', title: 'Discord Community',
+        body: 'Connect your Discord account to browse forum posts, read discussions, and post new threads — all without leaving the IDE. Sign in to your Nexia account first, then link Discord in Settings.',
+        position: 'right',
+    },
+    {
         target: '#editor-area',
         icon: '📝', title: 'Code Editor',
-        body: 'A full-featured code editor with syntax highlighting, auto-complete, and bracket matching. Open multiple files as tabs — right-click tabs for Close Others, Copy Path, and more. Ctrl+G jumps to a line number.',
+        body: 'A full-featured Monaco editor with syntax highlighting, IntelliSense, bracket matching, and Xbox 360 API completions. Open multiple files as tabs, right-click tabs for options. AI hint bar appears when you select code.',
         position: 'left',
     },
     {
         target: '#bottom-panel',
         icon: '📊', title: 'Output & Problems',
-        body: 'Build output appears here in real-time. The Problems tab shows clickable errors and warnings — click one to jump straight to the problem line. The Tips tab has Xbox 360 development tips.',
+        body: 'Build output streams here in real-time with MSBuild-style formatting. The Problems tab shows clickable errors and warnings — click one to jump to the line. The Tips tab has Xbox 360 development knowledge.',
         position: 'top',
         setup: () => {
             if (!bottomPanelVisible) toggleBottomPanel();
@@ -3194,24 +3646,13 @@ const TOUR_STEPS: TourStep[] = [
     {
         target: '#statusbar',
         icon: '📶', title: 'Status Bar',
-        body: 'Shows build status (Ready/Building/Succeeded/Failed), SDK detection, cursor position, zoom level, file encoding, and language mode. Green means everything is good to go.',
+        body: 'Shows build status, SDK detection, server connection, cursor position, zoom level, encoding, and language mode. A green dot means you\'re connected to the Nexia server.',
         position: 'top',
     },
     {
-        target: '[data-panel="learn"]',
-        icon: '🎓', title: 'Learn Panel',
-        body: 'Click here to open the Learn panel — it tracks your progress through the Xbox 360 development curriculum with step-by-step goals and achievements. Complete milestones to unlock new challenges!',
-        position: 'right',
-        setup: () => {
-            // Flash the learn tab
-            const learnTab = document.querySelector('[data-panel="learn"]') as HTMLElement;
-            if (learnTab) learnTab.style.animation = 'tour-pulse 1s ease 3';
-        },
-    },
-    {
         target: '#welcome-content',
-        icon: '🚀', title: 'You\'re All Set!',
-        body: 'Click "New Project" to create your first Xbox 360 project, or "Open Project" to load an existing one. Check the Learn panel for a guided curriculum that will walk you through building your first game. Happy coding!',
+        icon: '🚀', title: 'Ready to Build!',
+        body: 'Click "New Project" to create an Xbox 360 project (Executable, DLL, or Static Library), or "Open Project" to load an existing one. Open Settings from your avatar menu to configure AI, themes, and linked accounts. Happy coding!',
         position: 'top',
     },
 ];
@@ -3242,7 +3683,7 @@ function showTourStep() {
 
     // Update card content
     $('tour-step-badge').textContent = `${tourStep + 1} / ${TOUR_STEPS.length}`;
-    $('tour-icon').textContent = step.icon;
+    $('tour-icon').innerHTML = icons.replaceEmojis(step.icon);
     $('tour-title').textContent = step.title;
     $('tour-body').textContent = step.body;
 
@@ -3374,6 +3815,100 @@ $('tip-more').addEventListener('click', () => {
     if (tipBtn) tipBtn.click();
 });
 
+// ══════════════════════════════════════
+//  CINEMATIC TUTOR (opens in editor area)
+// ══════════════════════════════════════
+async function openCinematicTutor(lessonId?: string) {
+    const id = lessonId;
+    if (!id) { appendOutput('No lesson ID provided.\n'); return; }
+    const tabPath = '__cinematic__:' + id;
+    const existing = openTabs.find(t => t.path === tabPath);
+    if (existing) {
+        switchToTab(tabPath);
+        return;
+    }
+
+    // Create container in editor area if needed
+    if (!cinematicContainer) {
+        cinematicContainer = document.createElement('div');
+        cinematicContainer.id = 'cinematic-container';
+        cinematicContainer.style.cssText = 'display:none; flex:1; flex-direction:column; overflow:hidden; background:var(--bg-dark);';
+        $('editor-area').appendChild(cinematicContainer);
+    }
+
+    // All lessons loaded from .lesson packages via IPC
+    let tabName = '\u{1F3AC} ' + id;
+    try {
+        const lessonData = await ipcRenderer.invoke(IPC.LESSON_READ, id);
+        if (!lessonData) {
+            appendOutput('Failed to load lesson: ' + id + ' — not found\n');
+            return;
+        }
+        cinematicEngine.loadLesson(lessonData);
+        tabName = '\u{1F3AC} ' + (lessonData.meta?.title || id);
+    } catch (err: any) {
+        appendOutput('Failed to load lesson: ' + (err.message || err) + '\n');
+        return;
+    }
+
+    // Mount the cinematic engine into the container
+    cinematicEngine.mount(cinematicContainer);
+
+    // Create a dummy model for the tab system
+    const monaco = (window as any).monaco;
+    const model = monaco?.editor?.createModel?.('', 'plaintext') || { dispose: () => {}, getValue: () => '' };
+
+    openTabs.push({ path: tabPath, name: tabName, model, modified: false });
+    switchToTab(tabPath);
+}
+//  VISUALIZER PANEL (bottom panel)
+// ══════════════════════════════════════
+function initVisualizerPanel() {
+    const vizCanvas = $('visualizer-canvas') as HTMLCanvasElement;
+    if (vizCanvas) {
+        codeVisualizer.attach(vizCanvas);
+    }
+
+    $('viz-run')?.addEventListener('click', () => {
+        const cmd = ($('viz-command') as HTMLInputElement)?.value || '';
+        const type = ($('viz-type') as HTMLSelectElement)?.value || 'variables';
+
+        if (type === 'pointer') {
+            // Parse "ptr -> target" or just use defaults
+            const parts = cmd.split(/\s*->\s*/);
+            codeVisualizer.visualizePointer(parts[0] || 'ptr', parts[1] || 'value');
+        } else if (type === 'array') {
+            // Parse "name: 1,2,3,4,5" or just comma-separated values
+            const colonPos = cmd.indexOf(':');
+            if (colonPos !== -1) {
+                const name = cmd.substring(0, colonPos).trim();
+                const vals = cmd.substring(colonPos + 1).split(',').map(v => v.trim());
+                codeVisualizer.visualizeArray(name, vals);
+            } else {
+                const vals = cmd.split(',').map(v => v.trim());
+                codeVisualizer.visualizeArray('arr', vals);
+            }
+        } else {
+            // Default: parse as C++ variable declarations
+            codeVisualizer.visualizeCode(cmd.replace(/;/g, ';\n'));
+        }
+        codeVisualizer.render();
+    });
+
+    $('viz-clear')?.addEventListener('click', () => {
+        codeVisualizer.clear();
+        codeVisualizer.render();
+    });
+
+    // Re-render on resize
+    window.addEventListener('resize', () => {
+        if (vizCanvas) {
+            codeVisualizer.resizeCanvas();
+            codeVisualizer.render();
+        }
+    });
+}
+
 function renderTipsPanel() {
     const list = $('tips-list');
     if (!list) return;
@@ -3441,12 +3976,12 @@ function triggerAchievement(id: string) {
 // ══════════════════════════════════════
 //  LEARN PANEL (sidebar)
 // ══════════════════════════════════════
-function renderLearnPanel() {
+async function renderLearnPanel() {
     const panel = $('learn-panel');
     if (!panel) return;
     panel.innerHTML = '';
 
-    // Progress bar
+    // ── Progress Summary ──
     const totalAch = learning.ACHIEVEMENTS.length;
     const earnedAch = userProfile.completedAchievements.length;
     const pct = totalAch > 0 ? Math.round((earnedAch / totalAch) * 100) : 0;
@@ -3454,73 +3989,220 @@ function renderLearnPanel() {
     const progress = document.createElement('div');
     progress.className = 'learn-progress';
     progress.innerHTML = `
-        <div class="learn-section-title">PROGRESS — ${earnedAch}/${totalAch} Achievements (${pct}%)</div>
+        <div class="learn-section-title">PROGRESS \u2014 ${earnedAch}/${totalAch} Achievements (${pct}%)</div>
         <div class="learn-progress-bar"><div class="learn-progress-fill" style="width:${pct}%"></div></div>`;
     panel.appendChild(progress);
 
-    // Current goal
-    const nextGoal = learning.getNextGoal(userProfile);
-    if (nextGoal) {
-        const goalDiv = document.createElement('div');
-        goalDiv.className = 'learn-section';
-        goalDiv.innerHTML = `<div class="learn-section-title">CURRENT GOAL</div>`;
-        const goalCard = document.createElement('div');
-        goalCard.className = 'learn-goal';
-        goalCard.innerHTML = `
-            <div class="learn-goal-header">
-                <span class="learn-goal-icon">${nextGoal.icon}</span>
-                <span class="learn-goal-title">${nextGoal.title}</span>
-            </div>
-            <div class="learn-goal-desc">${nextGoal.description}</div>
-            ${nextGoal.steps.map((s: string, i: number) => `
-                <div class="learn-step">
-                    <span class="learn-step-num">${i + 1}</span>
-                    <span>${s}</span>
-                </div>`).join('')}`;
-        goalDiv.appendChild(goalCard);
-        panel.appendChild(goalDiv);
+    // ── Cinematic Lessons ──
+    const lessonsSection = document.createElement('div');
+    lessonsSection.className = 'learn-section';
+    lessonsSection.innerHTML = '<div class="learn-section-title">CINEMATIC LESSONS</div>';
+
+    // All lessons loaded from imported .lesson packages
+    let importedLessons: any[] = [];
+    try { importedLessons = await ipcRenderer.invoke(IPC.LESSON_LIST) || []; } catch {}
+
+    // Lesson card grid
+    const grid = document.createElement('div');
+    grid.className = 'lesson-grid';
+
+    if (importedLessons.length > 0) {
+        for (const lesson of importedLessons) {
+            grid.appendChild(createLessonCard({
+                id: lesson.id, title: lesson.title,
+                desc: lesson.description || 'by ' + (lesson.author || 'Unknown'),
+                difficulty: lesson.difficulty || 'Beginner', available: true, 
+                longDesc: lesson.description || '', duration: '', topics: lesson.tags || [],
+            }));
+        }
     } else {
-        const done = document.createElement('div');
-        done.className = 'learn-section';
-        done.innerHTML = '<div class="learn-section-title">ALL GOALS COMPLETE! 🏆</div><p style="padding:0 12px;font-size:12px;color:var(--text-dim)">Congratulations! You have completed the entire Xbox 360 development curriculum.</p>';
-        panel.appendChild(done);
+        const emptyMsg = document.createElement('div');
+        emptyMsg.style.cssText = 'padding:12px 4px;font-size:11px;color:var(--text-muted);text-align:center';
+        emptyMsg.textContent = 'No lessons installed. Import a .lesson package to get started.';
+        grid.appendChild(emptyMsg);
     }
 
-    // Achievements list
+    lessonsSection.appendChild(grid);
+    panel.appendChild(lessonsSection);
+
+    // ── Action Buttons ──
+    const actionsSection = document.createElement('div');
+    actionsSection.className = 'learn-actions';
+
+    const importBtn = document.createElement('button');
+    importBtn.className = 'learn-action-btn learn-action-primary';
+    importBtn.innerHTML = '\ud83d\udce5 Import Lesson';
+    importBtn.addEventListener('click', async () => {
+        const result = await ipcRenderer.invoke(IPC.LESSON_IMPORT);
+        if (result.success) { appendOutput('Imported cinematic lesson: ' + (result.title || result.lessonId) + '\n'); renderLearnPanel(); }
+        else if (result.error && result.error !== 'Cancelled') { appendOutput('Lesson import failed: ' + result.error + '\n'); }
+    });
+    actionsSection.appendChild(importBtn);
+    panel.appendChild(actionsSection);
+
+    // ── Achievements ──
     const achSection = document.createElement('div');
     achSection.className = 'learn-section';
     achSection.innerHTML = '<div class="learn-section-title">ACHIEVEMENTS</div>';
-    const grid = document.createElement('div');
-    grid.className = 'ach-grid';
-
+    const achGrid = document.createElement('div');
+    achGrid.className = 'ach-grid';
     const { earned, locked } = learning.getAchievementProgress(userProfile);
-    for (const a of earned) {
-        const item = document.createElement('div');
-        item.className = 'ach-item earned';
-        item.innerHTML = `<span class="ach-item-icon">${a.icon}</span><div><div class="ach-item-name">${a.name}</div><div class="ach-item-desc">${a.description}</div></div>`;
-        grid.appendChild(item);
-    }
-    for (const a of locked) {
-        const item = document.createElement('div');
-        item.className = 'ach-item locked';
-        item.innerHTML = `<span class="ach-item-icon">${a.icon}</span><div><div class="ach-item-name">${a.name}</div><div class="ach-item-desc">${a.description}</div></div>`;
-        grid.appendChild(item);
-    }
-    achSection.appendChild(grid);
+    for (const a of earned) { const item = document.createElement('div'); item.className = 'ach-item earned'; item.innerHTML = '<span class="ach-item-icon">' + a.icon + '</span><div><div class="ach-item-name">' + a.name + '</div><div class="ach-item-desc">' + a.description + '</div></div>'; achGrid.appendChild(item); }
+    for (const a of locked) { const item = document.createElement('div'); item.className = 'ach-item locked'; item.innerHTML = '<span class="ach-item-icon">' + a.icon + '</span><div><div class="ach-item-name">' + a.name + '</div><div class="ach-item-desc">' + a.description + '</div></div>'; achGrid.appendChild(item); }
+    achSection.appendChild(achGrid);
     panel.appendChild(achSection);
 
-    // Skill level indicator
+    // ── Skill Level ──
     const skillDiv = document.createElement('div');
     skillDiv.className = 'learn-section';
-    const levelIcons: Record<string, string> = { beginner: '🌱', intermediate: '🔧', expert: '⚡' };
-    skillDiv.innerHTML = `
-        <div class="learn-section-title">SKILL LEVEL</div>
-        <div style="padding:8px 0;font-size:13px;color:var(--text)">
-            ${levelIcons[userProfile.skillLevel] || '🌱'} ${userProfile.skillLevel.charAt(0).toUpperCase() + userProfile.skillLevel.slice(1)}
-            <span style="font-size:11px;color:var(--text-dim);margin-left:8px">Tips: ${userProfile.tipsEnabled ? 'ON' : 'OFF'}</span>
-        </div>`;
+    const levelIcons: Record<string, string> = { beginner: '\ud83c\udf31', intermediate: '\ud83d\udd27', expert: '\u26a1' };
+    skillDiv.innerHTML = '<div class="learn-section-title">SKILL LEVEL</div><div style="padding:4px 4px;font-size:11px;color:var(--text)">' + (levelIcons[userProfile.skillLevel] || '\ud83c\udf31') + ' ' + userProfile.skillLevel.charAt(0).toUpperCase() + userProfile.skillLevel.slice(1) + '</div>';
     panel.appendChild(skillDiv);
+
+    // ── Color Mode ──
+    const themeDiv = document.createElement('div');
+    themeDiv.className = 'learn-section';
+    const currentMode = document.documentElement.dataset.colorMode || 'dark';
+    themeDiv.innerHTML = `
+        <div class="learn-section-title">APPEARANCE</div>
+        <div class="learn-mode-picker">
+            <button class="learn-mode-btn ${currentMode === 'light' ? 'active' : ''}" data-mode="light">☀ Light</button>
+            <button class="learn-mode-btn ${currentMode === 'dark' ? 'active' : ''}" data-mode="dark">🌙 Dark</button>
+            <button class="learn-mode-btn ${currentMode === 'auto' ? 'active' : ''}" data-mode="auto">💻 Auto</button>
+        </div>`;
+    themeDiv.addEventListener('click', (e) => {
+        const btn = (e.target as HTMLElement).closest('.learn-mode-btn') as HTMLElement;
+        if (!btn) return;
+        const mode = btn.dataset.mode!;
+        applyColorMode(mode);
+        themeDiv.querySelectorAll('.learn-mode-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+    });
+    panel.appendChild(themeDiv);
 }
+
+function createLessonCard(lesson: { id: string; title: string; desc: string; difficulty: string; available: boolean; longDesc?: string; duration?: string; topics?: string[] }): HTMLElement {
+    const card = document.createElement('div');
+    card.className = 'lesson-card' + (lesson.available ? '' : ' lesson-locked');
+
+    const diffColor = lesson.difficulty === 'Beginner' ? '#4ec9b0' : lesson.difficulty === 'Intermediate' ? '#e5c07b' : '#c586c0';
+
+    card.innerHTML = `
+        <div class="lesson-card-icon">${lesson.available ? '\ud83c\udfac' : '\ud83d\udd12'}</div>
+        <div class="lesson-card-body">
+            <div class="lesson-card-title">${lesson.title}</div>
+        </div>
+        <div class="lesson-card-footer">
+            <span class="lesson-card-diff" style="color:${diffColor}">${lesson.difficulty.substring(0, 3).toUpperCase()}</span>
+        </div>`;
+
+    card.addEventListener('click', () => showLessonDetail(lesson));
+    return card;
+}
+
+function showLessonDetail(lesson: { id: string; title: string; desc: string; difficulty: string; available: boolean; longDesc?: string; duration?: string; topics?: string[] }) {
+    document.getElementById('lesson-detail-overlay')?.remove();
+
+    const overlay = document.createElement('div');
+    overlay.id = 'lesson-detail-overlay';
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+
+    const diffColor = lesson.difficulty === 'Beginner' ? '#4ec9b0' : lesson.difficulty === 'Intermediate' ? '#e5c07b' : '#c586c0';
+    const topicsHtml = (lesson.topics || []).map(t => `<span class="ld-topic">${escapeHtml(t)}</span>`).join('');
+    const previewData = getLessonPreviewData(lesson.id);
+
+    const modal = document.createElement('div');
+    modal.className = 'lesson-detail';
+    modal.innerHTML = `
+        <div class="ld-header">
+            <div class="ld-icon">${lesson.available ? '\ud83c\udfac' : '\ud83d\udd12'}</div>
+            <div>
+                <div class="ld-title">${escapeHtml(lesson.title)}</div>
+                <div class="ld-meta">
+                    <span class="ld-diff" style="color:${diffColor}">${lesson.difficulty}</span>
+                    ${lesson.duration ? `<span class="ld-dur">${lesson.duration}</span>` : ''}
+                </div>
+            </div>
+            <button class="ld-close" id="ld-close">\u2715</button>
+        </div>
+        <div class="ld-preview-row">
+            <div class="ld-preview-pane">
+                <div class="ld-preview-label">CINEMATIC LESSON</div>
+                <div class="ld-code-preview">
+                    ${previewData.codeBlocks.map(b => `
+                        <div class="ld-code-block" style="border-left:3px solid ${b.color}">
+                            <div class="ld-code-block-title" style="color:${b.color}">${escapeHtml(b.label)}</div>
+                            ${b.lines.map(l => `<div class="ld-code-line" style="width:${l}%"></div>`).join('')}
+                        </div>
+                    `).join('')}
+                    <div class="ld-spotlight-hint"><div class="ld-spotlight-box"></div><span>Spotlight explains each section</span></div>
+                </div>
+            </div>
+            <div class="ld-preview-pane">
+                <div class="ld-preview-label">RESULT</div>
+                <div class="ld-result-preview">
+                    <canvas id="ld-result-canvas" width="220" height="150"></canvas>
+                    <div class="ld-result-caption">${escapeHtml(previewData.resultCaption)}</div>
+                </div>
+            </div>
+        </div>
+        <div class="ld-body">
+            <div class="ld-desc">${escapeHtml(lesson.longDesc || lesson.desc)}</div>
+            ${topicsHtml ? `<div class="ld-topics-title">TOPICS COVERED</div><div class="ld-topics">${topicsHtml}</div>` : ''}
+        </div>
+        <div class="ld-footer">
+            ${lesson.available
+                ? `<button class="ld-btn ld-btn-primary" id="ld-begin">\u26a1 Begin Lesson</button>`
+                : `<div class="ld-locked-msg">\ud83d\udd12 This lesson is not yet available</div>`}
+            <button class="ld-btn ld-btn-secondary" id="ld-back">\u2190 Back</button>
+            <button class="ld-btn ld-btn-danger" id="ld-delete">\ud83d\uddd1 Delete Lesson</button>
+        </div>`;
+
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+    requestAnimationFrame(() => {
+        overlay.classList.add('visible');
+        const canvas = document.getElementById('ld-result-canvas') as HTMLCanvasElement;
+        if (canvas) renderLessonResultPreview(canvas, lesson.id);
+    });
+
+    modal.querySelector('#ld-close')!.addEventListener('click', () => overlay.remove());
+    modal.querySelector('#ld-back')!.addEventListener('click', () => overlay.remove());
+    if (lesson.available) {
+        modal.querySelector('#ld-begin')!.addEventListener('click', () => { overlay.remove(); openCinematicTutor(lesson.id); });
+    }
+    modal.querySelector('#ld-delete')!.addEventListener('click', async () => {
+        if (!confirm(`Delete "${lesson.title}"? This will remove the lesson and cannot be undone.`)) return;
+        try {
+            const result = await ipcRenderer.invoke(IPC.LESSON_DELETE, lesson.id);
+            if (result.success) { overlay.remove(); renderLearnPanel(); }
+            else { alert('Delete failed: ' + (result.error || 'Unknown error')); }
+        } catch (err: any) { alert('Delete failed: ' + err.message); }
+    });
+}
+
+interface LessonPreviewData { codeBlocks: { label: string; color: string; lines: number[] }[]; resultCaption: string; }
+
+function getLessonPreviewData(lessonId: string): LessonPreviewData {
+    // All preview data is generic — lessons define their own identity via packages
+    return {
+        codeBlocks: [
+            { label: 'Code Section 1', color: '#4ec9b0', lines: [70, 85, 60, 75] },
+            { label: 'Code Section 2', color: '#569cd6', lines: [80, 55, 90] },
+            { label: 'Code Section 3', color: '#e5c07b', lines: [65, 75, 85, 70] },
+        ],
+        resultCaption: 'Lesson output preview',
+    };
+}
+function renderLessonResultPreview(canvas: HTMLCanvasElement, lessonId: string) {
+    const ctx = canvas.getContext("2d")!;
+    const w = canvas.width, h = canvas.height;
+    ctx.fillStyle = "#0a0a12"; ctx.fillRect(0, 0, w, h);
+    ctx.fillStyle = "#4ec9b044"; ctx.beginPath(); ctx.roundRect(30, 30, w - 60, h - 60, 10); ctx.fill();
+    ctx.fillStyle = "#4ec9b0"; ctx.font = "10px sans-serif"; ctx.textAlign = "center";
+    ctx.fillText("Preview", w / 2, h / 2 + 4);
+}
+
 
 // ══════════════════════════════════════
 //  LEARNING HOOKS (connect to IDE events)
@@ -3539,6 +4221,11 @@ function onBuildComplete(result: any) {
         }
     } else {
         triggerTip('build-fail');
+        // Proactive tutor: explain the build errors
+        const errors = (result.errors || []).map((e: any) => e.message || e.text || String(e));
+        if (errors.length > 0 && (userSettings.aiApiKey || userSettings.aiProvider === 'local')) {
+            tutorOnBuildError(errors);
+        }
     }
     renderLearnPanel();
 }
@@ -3580,875 +4267,32 @@ document.addEventListener('keydown', resetIdleTipTimer);
 document.addEventListener('click', resetIdleTipTimer);
 
 // ══════════════════════════════════════
-//  QUIZ SYSTEM
+//  STUDY SYSTEM — Extracted to panels/studyPanel.ts
 // ══════════════════════════════════════
-function startQuiz(category?: string, mode?: 'multiple-choice' | 'fill-in') {
-    const allQ = quizzes.getQuizByCategory(category);
-    quizMode = mode || 'multiple-choice';
-    // Filter: MC questions need options, fill-in questions work without
-    if (quizMode === 'fill-in') {
-        quizQuestions = quizzes.shuffleArray(allQ).slice(0, 10);
-    } else {
-        quizQuestions = quizzes.shuffleArray(allQ.filter((q: any) => q.options)).slice(0, 10);
-    }
-    quizIndex = 0;
-    quizAnswered = false;
-    quizScore = { correct: 0, total: 0 };
-    $('quiz-overlay').classList.remove('hidden');
-    renderQuizQuestion();
-}
-
-function renderQuizQuestion() {
-    if (quizIndex >= quizQuestions.length) { showQuizResults(); return; }
-    const q = quizQuestions[quizIndex];
-    quizAnswered = false;
-    $('quiz-progress').textContent = `${quizIndex + 1} / ${quizQuestions.length}`;
-    $('quiz-question').textContent = q.question;
-    $('quiz-feedback').className = 'quiz-feedback hidden';
-    $('quiz-ref').className = 'quiz-ref hidden';
-    $('quiz-next').textContent = quizIndex < quizQuestions.length - 1 ? 'Next →' : 'Finish';
-
-    // Show correct mode
-    if (quizMode === 'fill-in' || !q.options) {
-        $('quiz-mode-mc').style.display = 'none';
-        $('quiz-mode-fill').style.display = 'block';
-        ($('quiz-fill-input') as HTMLInputElement).value = '';
-        ($('quiz-fill-input') as HTMLInputElement).focus();
-    } else {
-        $('quiz-mode-mc').style.display = 'block';
-        $('quiz-mode-fill').style.display = 'none';
-        const opts = $('quiz-options');
-        opts.innerHTML = '';
-        q.options.forEach((opt: string, i: number) => {
-            const btn = document.createElement('button');
-            btn.className = 'quiz-option';
-            btn.textContent = opt;
-            btn.addEventListener('click', () => answerQuizMC(i));
-            opts.appendChild(btn);
-        });
-    }
-}
-
-function answerQuizMC(idx: number) {
-    if (quizAnswered) return;
-    quizAnswered = true;
-    quizScore.total++;
-    const q = quizQuestions[quizIndex];
-    const correct = idx === q.answerIndex;
-    if (correct) quizScore.correct++;
-
-    const btns = $('quiz-options').querySelectorAll('.quiz-option');
-    btns.forEach((b: any, i: number) => {
-        if (i === q.answerIndex) b.classList.add('correct');
-        else if (i === idx && !correct) b.classList.add('incorrect');
-    });
-    showQuizFeedback(correct, q);
-}
-
-function answerQuizFill() {
-    if (quizAnswered) return;
-    const input = ($('quiz-fill-input') as HTMLInputElement).value.trim();
-    if (!input) return;
-    quizAnswered = true;
-    quizScore.total++;
-    const q = quizQuestions[quizIndex];
-    const correct = input.toLowerCase().includes(q.answer.toLowerCase());
-    if (correct) quizScore.correct++;
-    showQuizFeedback(correct, q);
-}
-
-function showQuizFeedback(correct: boolean, q: any) {
-    const fb = $('quiz-feedback');
-    fb.className = `quiz-feedback ${correct ? 'correct' : 'incorrect'}`;
-    fb.textContent = correct ? '✓ Correct!' : `✗ Incorrect. The answer is: ${q.answer}`;
-}
-
-function showQuizResults() {
-    const pct = quizScore.total > 0 ? Math.round((quizScore.correct / quizScore.total) * 100) : 0;
-    $('quiz-question').textContent = `Quiz Complete! You scored ${quizScore.correct}/${quizScore.total} (${pct}%)`;
-    $('quiz-options').innerHTML = '';
-    $('quiz-mode-mc').style.display = 'none';
-    $('quiz-mode-fill').style.display = 'none';
-    $('quiz-feedback').className = 'quiz-feedback hidden';
-    $('quiz-next').textContent = 'Close';
-    $('quiz-progress').textContent = 'Done!';
-    // Update profile stats
-    renderLearnPanel();
-}
-
-// Wire quiz buttons
-$('quiz-next').addEventListener('click', () => {
-    if (quizIndex >= quizQuestions.length) { $('quiz-overlay').classList.add('hidden'); return; }
-    quizIndex++;
-    renderQuizQuestion();
-});
-$('quiz-close').addEventListener('click', () => $('quiz-overlay').classList.add('hidden'));
-$('quiz-ref-btn').addEventListener('click', () => {
-    if (quizIndex < quizQuestions.length) {
-        $('quiz-ref').classList.remove('hidden');
-        $('quiz-ref-text').textContent = quizQuestions[quizIndex].reference;
-    }
-});
-$('quiz-note-btn').addEventListener('click', () => {
-    if (quizIndex < quizQuestions.length) {
-        const q = quizQuestions[quizIndex];
-        flashcards.push({ front: q.question, back: q.answer + ' — ' + q.reference });
-        saveFlashcards();
-        appendOutput(`📌 Saved flashcard: "${q.question.substring(0, 40)}..."\n`);
-    }
-});
-$('quiz-fill-submit').addEventListener('click', answerQuizFill);
+const { initStudy, loadFlashcards, initStudyButtons, startQuiz,
+        showFlashcards, renderStudyPanel } = require('./panels/studyPanel');
+// initStudy + initStudyButtons called in init() after aiService loads
 
 // ══════════════════════════════════════
-//  FLASHCARD SYSTEM
+//  COMMUNITY PANEL — Extracted to panels/communityPanel.ts
 // ══════════════════════════════════════
-function loadFlashcards() {
-    try {
-        const file = nodePath.join(nodeOs.homedir(), '.nexia-ide-flashcards.json');
-        if (nodeFs.existsSync(file)) flashcards = JSON.parse(nodeFs.readFileSync(file, 'utf-8'));
-    } catch {}
+let communityPanel: any;
+try {
+    communityPanel = require('./panels/communityPanel');
+} catch (err: any) {
+    console.error('[Community] Module load failed:', err.message);
+    communityPanel = {
+        initCommunity: () => {},
+        renderCommunityPanel: () => {},
+        refreshCommunityView: async () => {},
+        showDiscordSetup: () => {},
+        getDiscordAuthUser: () => null,
+        setDiscordAuthUser: () => {},
+    };
 }
-function saveFlashcards() {
-    try { nodeFs.writeFileSync(nodePath.join(nodeOs.homedir(), '.nexia-ide-flashcards.json'), JSON.stringify(flashcards, null, 2)); } catch {}
-}
+const { renderCommunityPanel, refreshCommunityView, showDiscordSetup,
+        getDiscordAuthUser, setDiscordAuthUser } = communityPanel;
 
-function showFlashcards() {
-    if (flashcards.length === 0) {
-        alert('No flashcards yet! Take a quiz and click "Save as Flashcard" to create some, or add them from the Study panel.');
-        return;
-    }
-    fcIndex = 0;
-    $('flashcard-overlay').classList.remove('hidden');
-    renderFlashcard();
-}
-
-function renderFlashcard() {
-    if (flashcards.length === 0) return;
-    const fc = flashcards[fcIndex];
-    $('fc-front-text').textContent = fc.front;
-    $('fc-back-text').textContent = fc.back;
-    $('fc-progress').textContent = `${fcIndex + 1} / ${flashcards.length}`;
-    document.getElementById('flashcard')!.classList.remove('flipped');
-}
-
-$('flashcard').addEventListener('click', () => document.getElementById('flashcard')!.classList.toggle('flipped'));
-$('fc-flip').addEventListener('click', () => document.getElementById('flashcard')!.classList.toggle('flipped'));
-$('fc-prev').addEventListener('click', () => { if (fcIndex > 0) { fcIndex--; renderFlashcard(); } });
-$('fc-next').addEventListener('click', () => { if (fcIndex < flashcards.length - 1) { fcIndex++; renderFlashcard(); } });
-$('fc-close').addEventListener('click', () => $('flashcard-overlay').classList.add('hidden'));
-
-// ══════════════════════════════════════
-//  STUDY NOTES
-// ══════════════════════════════════════
-function getNotesFile(): string {
-    if (currentProject) return nodePath.join(currentProject.path, 'study-notes.txt');
-    return nodePath.join(nodeOs.homedir(), '.nexia-ide-notes.txt');
-}
-
-function showNotes() {
-    try {
-        const file = getNotesFile();
-        if (nodeFs.existsSync(file)) studyNotes = nodeFs.readFileSync(file, 'utf-8');
-    } catch {}
-    ($('notes-editor') as HTMLTextAreaElement).value = studyNotes;
-    $('notes-overlay').classList.remove('hidden');
-}
-
-$('notes-save').addEventListener('click', () => {
-    studyNotes = ($('notes-editor') as HTMLTextAreaElement).value;
-    try { nodeFs.writeFileSync(getNotesFile(), studyNotes, 'utf-8'); } catch {}
-    $('notes-overlay').classList.add('hidden');
-    appendOutput('📓 Study notes saved.\n');
-});
-
-$('notes-export').addEventListener('click', () => {
-    const content = ($('notes-editor') as HTMLTextAreaElement).value;
-    const { dialog } = require('electron').remote || {};
-    // Fallback: save to project or home
-    const dest = currentProject
-        ? nodePath.join(currentProject.path, 'study-notes-export.txt')
-        : nodePath.join(nodeOs.homedir(), 'Desktop', 'nexia-study-notes.txt');
-    try { nodeFs.writeFileSync(dest, content, 'utf-8'); appendOutput(`📓 Notes exported to: ${dest}\n`); } catch {}
-});
-
-// ══════════════════════════════════════
-//  STUDY PANEL (sidebar)
-// ══════════════════════════════════════
-function renderStudyPanel() {
-    const panel = $('study-panel');
-    if (!panel) return;
-    panel.innerHTML = '';
-
-    // Stats
-    const statsDiv = document.createElement('div');
-    statsDiv.className = 'study-stats';
-    statsDiv.innerHTML = `
-        <div class="study-stat"><div class="study-stat-num">${flashcards.length}</div><div class="study-stat-label">Flashcards</div></div>
-        <div class="study-stat"><div class="study-stat-num">${quizzes.QUIZ_BANK.length}</div><div class="study-stat-label">Quiz Questions</div></div>`;
-    panel.appendChild(statsDiv);
-
-    // Actions
-    const section = document.createElement('div');
-    section.className = 'study-section';
-    section.innerHTML = '<div class="learn-section-title">STUDY TOOLS</div>';
-
-    const cats = quizzes.getQuizCategories();
-    // Quiz buttons per category
-    for (const cat of cats) {
-        const btn = document.createElement('button');
-        btn.className = 'study-btn';
-        btn.innerHTML = `<span class="study-btn-icon">📝</span><div><div class="study-btn-label">${cat} Quiz</div><div class="study-btn-desc">Multiple choice questions</div></div>`;
-        btn.addEventListener('click', () => startQuiz(cat, 'multiple-choice'));
-        section.appendChild(btn);
-    }
-
-    // Fill-in quiz
-    const fillBtn = document.createElement('button');
-    fillBtn.className = 'study-btn';
-    fillBtn.innerHTML = '<span class="study-btn-icon">✏️</span><div><div class="study-btn-label">Fill-in-the-Blank Quiz</div><div class="study-btn-desc">Type your answers — all categories</div></div>';
-    fillBtn.addEventListener('click', () => startQuiz(undefined, 'fill-in'));
-    section.appendChild(fillBtn);
-
-    // Flashcards
-    const fcBtn = document.createElement('button');
-    fcBtn.className = 'study-btn';
-    fcBtn.innerHTML = `<span class="study-btn-icon">🃏</span><div><div class="study-btn-label">Flashcards (${flashcards.length})</div><div class="study-btn-desc">Review saved cards</div></div>`;
-    fcBtn.addEventListener('click', showFlashcards);
-    section.appendChild(fcBtn);
-
-    // Add flashcard manually
-    const addFcBtn = document.createElement('button');
-    addFcBtn.className = 'study-btn';
-    addFcBtn.innerHTML = '<span class="study-btn-icon">➕</span><div><div class="study-btn-label">Add Flashcard</div><div class="study-btn-desc">Create a custom flashcard</div></div>';
-    addFcBtn.addEventListener('click', () => {
-        const front = prompt('Flashcard front (question):');
-        if (!front) return;
-        const back = prompt('Flashcard back (answer):');
-        if (!back) return;
-        flashcards.push({ front, back });
-        saveFlashcards();
-        renderStudyPanel();
-    });
-    section.appendChild(addFcBtn);
-
-    // Study notes
-    const notesBtn = document.createElement('button');
-    notesBtn.className = 'study-btn';
-    notesBtn.innerHTML = '<span class="study-btn-icon">📓</span><div><div class="study-btn-label">Study Notes</div><div class="study-btn-desc">Write and save personal notes</div></div>';
-    notesBtn.addEventListener('click', showNotes);
-    section.appendChild(notesBtn);
-
-    panel.appendChild(section);
-}
-
-// ══════════════════════════════════════
-//  COMMUNITY PANEL (Discord feed + invite)
-// ══════════════════════════════════════
-let discordFeedLoading = false;
-let currentThreadView: string | null = null;
-let discordAuthUser: { id: string; username: string; avatarUrl: string | null } | null = null;
-let threadPollInterval: ReturnType<typeof setInterval> | null = null;
-let feedPollInterval: ReturnType<typeof setInterval> | null = null;
-let lastSeenMessageId: string | null = null;
-const THREAD_POLL_MS = 5000;  // Poll thread messages every 5s
-const FEED_POLL_MS = 30000;   // Poll feed every 30s
-
-function stopThreadPoll() {
-    if (threadPollInterval) { clearInterval(threadPollInterval); threadPollInterval = null; }
-}
-
-function startThreadPoll(threadId: string) {
-    stopThreadPoll();
-    threadPollInterval = setInterval(() => pollThreadMessages(threadId), THREAD_POLL_MS);
-}
-
-async function pollThreadMessages(threadId: string) {
-    if (currentThreadView !== threadId || !lastSeenMessageId) return;
-
-    try {
-        const newMsgs = await ipcRenderer.invoke(IPC.DISCORD_GET_NEW_MESSAGES, threadId, lastSeenMessageId);
-        if (!newMsgs || newMsgs.length === 0) return;
-
-        const container = document.getElementById('thread-messages');
-        if (!container) return;
-
-        const wasAtBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 40;
-
-        for (const msg of newMsgs) {
-            appendMessageToView(container, msg, true);
-            lastSeenMessageId = msg.id;
-        }
-
-        // Auto-scroll if user was already at the bottom
-        if (wasAtBottom) {
-            container.scrollTop = container.scrollHeight;
-        } else {
-            // Show "new messages" indicator
-            showNewMessagesBadge(container, newMsgs.length);
-        }
-    } catch {}
-}
-
-function showNewMessagesBadge(container: HTMLElement, count: number) {
-    let badge = container.parentElement?.querySelector('.new-msgs-badge') as HTMLElement;
-    if (!badge) {
-        badge = document.createElement('div');
-        badge.className = 'new-msgs-badge';
-        badge.addEventListener('click', () => {
-            container.scrollTop = container.scrollHeight;
-            badge.remove();
-        });
-        container.parentElement?.insertBefore(badge, container.nextSibling);
-    }
-    badge.textContent = `↓ ${count} new message${count > 1 ? 's' : ''}`;
-}
-
-function stopFeedPoll() {
-    if (feedPollInterval) { clearInterval(feedPollInterval); feedPollInterval = null; }
-}
-
-function startFeedPoll() {
-    stopFeedPoll();
-    feedPollInterval = setInterval(() => pollFeed(), FEED_POLL_MS);
-}
-
-async function pollFeed() {
-    if (currentThreadView) return; // Don't poll feed while viewing a thread
-    const feedEl = document.getElementById('community-feed');
-    if (!feedEl || discordFeedLoading) return;
-
-    try {
-        const threads = await ipcRenderer.invoke(IPC.DISCORD_GET_FEED, true);
-        if (!threads || threads.length === 0) return;
-
-        // Check if feed content changed by comparing first thread's last message
-        const firstCard = feedEl.querySelector('.discord-thread');
-        const currentFirstId = firstCard?.getAttribute('data-thread-id');
-        if (threads[0]?.id !== currentFirstId) {
-            // Feed has new content — rebuild quietly
-            renderFeedCards(feedEl, threads);
-        }
-    } catch {}
-}
-
-function renderCommunityPanel() {
-    const panel = $('community-panel');
-    if (!panel) return;
-
-    panel.innerHTML = `
-        <div class="community-header">
-            <div class="community-invite">
-                <span class="community-invite-icon">💬</span>
-                <div>
-                    <div class="community-invite-title">Nexia Discord</div>
-                    <div class="community-invite-sub">Xbox 360 homebrew community</div>
-                </div>
-                <button class="community-join-btn" id="community-discord-btn">Join</button>
-            </div>
-        </div>
-        <div class="discord-auth-bar" id="discord-auth-bar">
-            <div class="discord-auth-loading">Checking login...</div>
-        </div>
-        <div class="community-feed-header">
-            <span>📋 Software Tools Forum</span>
-            <div style="display:flex;gap:4px;">
-                <button class="community-action-btn" id="community-new-post-btn" title="New Post" style="display:none;">+ New</button>
-                <button class="community-refresh-btn" id="community-refresh-btn" title="Refresh feed">↻</button>
-                <button class="community-refresh-btn" id="community-settings-btn" title="Settings">⚙</button>
-            </div>
-        </div>
-        <div id="community-feed" class="community-feed">
-            <div class="community-feed-placeholder">
-                <p>Configure a Discord bot to see forum posts here.</p>
-                <button class="community-setup-btn" id="community-setup-btn">⚙ Setup Discord Feed</button>
-            </div>
-        </div>
-        <div id="community-thread-view" class="community-thread-view hidden"></div>
-    `;
-
-    document.getElementById('community-discord-btn')!.addEventListener('click', () => shell.openExternal('https://discord.gg/d3AeCyH7bN'));
-    document.getElementById('community-refresh-btn')!.addEventListener('click', () => loadDiscordFeed(true));
-    document.getElementById('community-settings-btn')!.addEventListener('click', () => showDiscordSetup());
-    document.getElementById('community-new-post-btn')!.addEventListener('click', () => showNewPostDialog());
-    document.getElementById('community-setup-btn')!.addEventListener('click', () => showDiscordSetup());
-
-    refreshAuthBar();
-    loadDiscordFeed();
-}
-
-async function refreshAuthBar() {
-    const bar = document.getElementById('discord-auth-bar');
-    if (!bar) return;
-
-    const result = await ipcRenderer.invoke(IPC.DISCORD_AUTH_USER);
-    if (result.loggedIn) {
-        discordAuthUser = { id: result.id, username: result.username, avatarUrl: result.avatarUrl };
-        bar.innerHTML = `
-            <div class="discord-auth-user">
-                ${result.avatarUrl ? `<img class="discord-auth-avatar" src="${result.avatarUrl}" alt="">` : '<span class="discord-auth-avatar-placeholder">👤</span>'}
-                <span class="discord-auth-name">${escapeHtml(result.username)}</span>
-                <button class="discord-auth-logout" id="discord-logout-btn" title="Log out">Log out</button>
-            </div>
-        `;
-        document.getElementById('discord-logout-btn')!.addEventListener('click', async () => {
-            await ipcRenderer.invoke(IPC.DISCORD_AUTH_LOGOUT);
-            discordAuthUser = null;
-            refreshAuthBar();
-            // Re-render thread view if open to hide reply bar
-            if (currentThreadView) {
-                const threadView = document.getElementById('community-thread-view');
-                const replyBar = threadView?.querySelector('.thread-reply-bar') as HTMLElement;
-                if (replyBar) replyBar.innerHTML = '<div class="thread-reply-login">Log in to reply</div>';
-            }
-        });
-        // Show new post button
-        const newBtn = document.getElementById('community-new-post-btn');
-        if (newBtn) newBtn.style.display = '';
-    } else {
-        discordAuthUser = null;
-        bar.innerHTML = `
-            <div class="discord-auth-prompt">
-                <span>Log in to post and reply</span>
-                <button class="discord-auth-login" id="discord-login-btn">Login with Discord</button>
-            </div>
-        `;
-        document.getElementById('discord-login-btn')!.addEventListener('click', async () => {
-            const loginBtn = document.getElementById('discord-login-btn') as HTMLButtonElement;
-            loginBtn.textContent = 'Waiting...';
-            loginBtn.disabled = true;
-            const result = await ipcRenderer.invoke(IPC.DISCORD_AUTH_START);
-            if (result.success) {
-                refreshAuthBar();
-            } else {
-                loginBtn.textContent = 'Login with Discord';
-                loginBtn.disabled = false;
-                if (result.error) appendOutput('Discord login: ' + result.error + '\n');
-            }
-        });
-        // Hide new post button
-        const newBtn = document.getElementById('community-new-post-btn');
-        if (newBtn) newBtn.style.display = 'none';
-    }
-}
-
-async function loadDiscordFeed(force: boolean = false) {
-    const feedEl = document.getElementById('community-feed');
-    if (!feedEl || discordFeedLoading) return;
-
-    // Hide thread view, show feed
-    const threadView = document.getElementById('community-thread-view');
-    if (threadView) threadView.classList.add('hidden');
-    feedEl.classList.remove('hidden');
-    currentThreadView = null;
-    lastSeenMessageId = null;
-    stopThreadPoll();
-
-    const config = await ipcRenderer.invoke(IPC.DISCORD_GET_CONFIG);
-    if (!config.enabled) {
-        feedEl.innerHTML = `
-            <div class="community-feed-placeholder">
-                <p>Connect a Discord bot to pull forum posts<br>from your server into the IDE.</p>
-                <button class="community-setup-btn" id="community-setup-btn2">⚙ Setup Discord Feed</button>
-            </div>`;
-        document.getElementById('community-setup-btn2')?.addEventListener('click', () => showDiscordSetup());
-        return;
-    }
-
-    discordFeedLoading = true;
-    feedEl.innerHTML = '<div class="community-feed-loading">Loading forum threads...</div>';
-
-    try {
-        const threads = await ipcRenderer.invoke(IPC.DISCORD_GET_FEED, force);
-        if (!threads || threads.length === 0) {
-            feedEl.innerHTML = '<div class="community-feed-placeholder"><p>No forum threads found.<br>Check your channel ID and bot permissions.</p></div>';
-            return;
-        }
-        feedEl.innerHTML = '';
-        renderFeedCards(feedEl, threads);
-    } catch (err: any) {
-        feedEl.innerHTML = `<div class="community-feed-placeholder"><p>Failed to load feed:<br>${escapeHtml(err.message || 'Unknown error')}</p></div>`;
-    } finally {
-        discordFeedLoading = false;
-        // Start feed polling
-        startFeedPoll();
-    }
-}
-
-function renderFeedCards(feedEl: HTMLElement, threads: any[]) {
-    feedEl.innerHTML = '';
-    for (const thread of threads) {
-        const card = document.createElement('div');
-        card.className = 'discord-thread' + (thread.pinned ? ' pinned' : '');
-        card.setAttribute('data-thread-id', thread.id);
-        const timeAgo = formatTimeAgo(thread.createdAt);
-        const preview = escapeHtml(thread.preview);
-        card.innerHTML = `
-            <div class="discord-thread-header">
-                ${thread.pinned ? '<span class="discord-pin">📌</span>' : ''}
-                <span class="discord-thread-title">${escapeHtml(thread.name)}</span>
-            </div>
-            <div class="discord-thread-meta">
-                <span class="discord-thread-author">${escapeHtml(thread.authorName)}</span>
-                <span class="discord-thread-time">${timeAgo}</span>
-                <span class="discord-thread-replies">💬 ${thread.messageCount}</span>
-            </div>
-            ${preview ? `<div class="discord-thread-preview">${preview}</div>` : ''}
-        `;
-        card.addEventListener('click', () => openThreadView(thread.id, thread.name));
-        feedEl.appendChild(card);
-    }
-}
-
-async function openThreadView(threadId: string, threadName: string) {
-    const feedEl = document.getElementById('community-feed');
-    const threadView = document.getElementById('community-thread-view');
-    if (!feedEl || !threadView) return;
-
-    feedEl.classList.add('hidden');
-    threadView.classList.remove('hidden');
-    currentThreadView = threadId;
-    lastSeenMessageId = null;
-    stopFeedPoll();
-    stopThreadPoll();
-
-    threadView.innerHTML = `
-        <div class="thread-view-header">
-            <button class="thread-back-btn" id="thread-back-btn">← Back</button>
-            <span class="thread-view-title">${escapeHtml(threadName)}</span>
-            <button class="thread-open-discord-btn" id="thread-open-discord" title="Open in Discord">↗</button>
-        </div>
-        <div class="thread-messages" id="thread-messages">
-            <div class="community-feed-loading">Loading messages...</div>
-        </div>
-        <div class="thread-reply-bar" id="thread-reply-bar">
-            ${discordAuthUser
-                ? `<input type="text" id="thread-reply-input" placeholder="Reply as ${escapeHtml(discordAuthUser.username)}..." autocomplete="off">
-                   <button class="thread-reply-send" id="thread-reply-send">Send</button>`
-                : `<div class="thread-reply-login">Log in with Discord to reply</div>`
-            }
-        </div>
-    `;
-
-    document.getElementById('thread-back-btn')!.addEventListener('click', () => loadDiscordFeed(true));
-    document.getElementById('thread-open-discord')!.addEventListener('click', () => {
-        shell.openExternal(`https://discord.com/channels/@me/${threadId}`);
-    });
-
-    // Reply (only if logged in)
-    if (discordAuthUser) {
-        const replyInput = document.getElementById('thread-reply-input') as HTMLInputElement;
-        const replySend = document.getElementById('thread-reply-send')!;
-        const sendReply = async () => {
-            const content = replyInput.value.trim();
-            if (!content) return;
-            replyInput.disabled = true;
-            replySend.textContent = '...';
-            const result = await ipcRenderer.invoke(IPC.DISCORD_REPLY, threadId, content);
-            if (result.success) {
-                replyInput.value = '';
-                // Quick poll to pick up our own reply
-                setTimeout(() => pollThreadMessages(threadId), 1000);
-            } else {
-                appendOutput('Reply failed: ' + (result.error || 'Unknown error') + '\n');
-            }
-            replyInput.disabled = false;
-            replySend.textContent = 'Send';
-            replyInput.focus();
-        };
-        replySend.addEventListener('click', sendReply);
-        replyInput.addEventListener('keydown', (e: KeyboardEvent) => { if (e.key === 'Enter') sendReply(); });
-    }
-
-    await loadThreadMessages(threadId);
-}
-
-async function loadThreadMessages(threadId: string) {
-    const container = document.getElementById('thread-messages');
-    if (!container) return;
-
-    try {
-        const messages = await ipcRenderer.invoke(IPC.DISCORD_GET_MESSAGES, threadId);
-        if (!messages || messages.length === 0) {
-            container.innerHTML = '<div class="community-feed-placeholder"><p>No messages found.</p></div>';
-            return;
-        }
-
-        container.innerHTML = '';
-        for (const msg of messages) {
-            appendMessageToView(container, msg, false);
-        }
-
-        // Track last message for polling
-        lastSeenMessageId = messages[messages.length - 1].id;
-
-        // Scroll to bottom
-        container.scrollTop = container.scrollHeight;
-
-        // Start live polling
-        startThreadPoll(threadId);
-
-        // Auto-dismiss new messages badge when scrolled to bottom
-        container.addEventListener('scroll', () => {
-            if (container.scrollHeight - container.scrollTop - container.clientHeight < 40) {
-                const badge = container.parentElement?.querySelector('.new-msgs-badge');
-                if (badge) badge.remove();
-            }
-        });
-    } catch (err: any) {
-        container.innerHTML = `<div class="community-feed-placeholder"><p>Failed to load messages:<br>${escapeHtml(err.message || 'Error')}</p></div>`;
-    }
-}
-
-function appendMessageToView(container: HTMLElement, msg: any, isNew: boolean) {
-    const msgEl = document.createElement('div');
-    msgEl.className = 'thread-message' + (msg.authorIsBot ? ' bot-message' : '') + (isNew ? ' new-message' : '');
-    msgEl.setAttribute('data-msg-id', msg.id);
-
-    let attachmentsHtml = '';
-    if (msg.attachments && msg.attachments.length > 0) {
-        attachmentsHtml = '<div class="msg-attachments">';
-        for (const att of msg.attachments) {
-            const sizeStr = formatFileSize(att.size);
-            const isImage = att.contentType && att.contentType.startsWith('image/');
-            attachmentsHtml += `
-                <div class="msg-attachment" data-url="${escapeHtml(att.url)}" data-filename="${escapeHtml(att.filename)}">
-                    <span class="msg-att-icon">${isImage ? '🖼' : '📎'}</span>
-                    <div class="msg-att-info">
-                        <span class="msg-att-name">${escapeHtml(att.filename)}</span>
-                        <span class="msg-att-size">${sizeStr}</span>
-                    </div>
-                    <button class="msg-att-dl" title="Download">↓</button>
-                </div>
-            `;
-        }
-        attachmentsHtml += '</div>';
-    }
-
-    let embedsHtml = '';
-    if (msg.embeds && msg.embeds.length > 0) {
-        for (const embed of msg.embeds) {
-            if (embed.title || embed.description) {
-                embedsHtml += `<div class="msg-embed">`;
-                if (embed.title) embedsHtml += `<div class="msg-embed-title">${escapeHtml(embed.title)}</div>`;
-                if (embed.description) embedsHtml += `<div class="msg-embed-desc">${escapeHtml(embed.description)}</div>`;
-                embedsHtml += `</div>`;
-            }
-        }
-    }
-
-    const timeStr = new Date(msg.createdAt).toLocaleString();
-    const contentHtml = formatDiscordContent(msg.content);
-
-    msgEl.innerHTML = `
-        <div class="msg-header">
-            <span class="msg-author${msg.authorIsBot ? ' msg-bot' : ''}">${escapeHtml(msg.authorName)}${msg.authorIsBot ? ' <span class="msg-bot-badge">BOT</span>' : ''}</span>
-            <span class="msg-time">${timeStr}</span>
-        </div>
-        ${contentHtml ? `<div class="msg-content">${contentHtml}</div>` : ''}
-        ${attachmentsHtml}
-        ${embedsHtml}
-    `;
-
-    // Wire download buttons
-    const dlBtns = msgEl.querySelectorAll('.msg-att-dl');
-    dlBtns.forEach((btn) => {
-        btn.addEventListener('click', async (e: Event) => {
-            e.stopPropagation();
-            const attEl = (btn as HTMLElement).closest('.msg-attachment') as HTMLElement;
-            const url = attEl.dataset.url || '';
-            const filename = attEl.dataset.filename || 'download';
-            (btn as HTMLElement).textContent = '...';
-            const result = await ipcRenderer.invoke(IPC.DISCORD_DOWNLOAD, url, filename);
-            if (result.success) {
-                (btn as HTMLElement).textContent = '✓';
-                appendOutput(`Downloaded: ${filename}\n`);
-            } else {
-                (btn as HTMLElement).textContent = '✗';
-                appendOutput(`Download failed: ${result.error}\n`);
-            }
-        });
-    });
-
-    container.appendChild(msgEl);
-}
-
-function showNewPostDialog() {
-    if (!discordAuthUser) {
-        appendOutput('You must be logged in to create a post.\n');
-        return;
-    }
-    const overlay = document.createElement('div');
-    overlay.className = 'overlay';
-    overlay.id = 'new-post-overlay';
-    overlay.innerHTML = `
-        <div class="discord-setup-dialog" style="width:520px;">
-            <h2>📋 New Forum Post</h2>
-            <p class="discord-setup-info">
-                Create a new post in the Software Tools forum channel.
-                This will be posted as <strong>${escapeHtml(discordAuthUser!.username)}</strong> via Nexia IDE.
-            </p>
-            <div class="dialog-field">
-                <label>Title</label>
-                <input type="text" id="new-post-title" placeholder="Post title..." maxlength="100" autocomplete="off">
-            </div>
-            <div class="dialog-field">
-                <label>Content</label>
-                <textarea id="new-post-content" placeholder="Write your post content here..." rows="8"
-                    style="width:100%;padding:8px 12px;background:var(--bg-input);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--font);font-size:13px;resize:vertical;"></textarea>
-            </div>
-            <div class="dialog-buttons">
-                <button class="setup-btn-secondary" id="new-post-cancel">Cancel</button>
-                <button class="setup-btn-primary" id="new-post-submit">Publish</button>
-            </div>
-        </div>
-    `;
-    document.body.appendChild(overlay);
-
-    document.getElementById('new-post-cancel')!.addEventListener('click', () => overlay.remove());
-    document.getElementById('new-post-submit')!.addEventListener('click', async () => {
-        const title = (document.getElementById('new-post-title') as HTMLInputElement).value.trim();
-        const content = (document.getElementById('new-post-content') as HTMLTextAreaElement).value.trim();
-
-        if (!title) { alert('Please enter a title.'); return; }
-        if (!content) { alert('Please enter content.'); return; }
-
-        const btn = document.getElementById('new-post-submit')!;
-        btn.textContent = 'Publishing...';
-        (btn as HTMLButtonElement).disabled = true;
-
-        const result = await ipcRenderer.invoke(IPC.DISCORD_CREATE_THREAD, title, content);
-        if (result.success) {
-            overlay.remove();
-            appendOutput(`Published forum post: "${title}"\n`);
-            // Small delay for Discord API propagation, then force refresh
-            setTimeout(() => loadDiscordFeed(true), 1500);
-        } else {
-            btn.textContent = 'Publish';
-            (btn as HTMLButtonElement).disabled = false;
-            alert('Failed to publish: ' + (result.error || 'Unknown error'));
-        }
-    });
-
-    document.getElementById('new-post-title')!.focus();
-}
-
-function showDiscordSetup() {
-    const overlay = document.createElement('div');
-    overlay.className = 'overlay';
-    overlay.id = 'discord-setup-overlay';
-    overlay.innerHTML = `
-        <div class="discord-setup-dialog">
-            <h2>⚙ Discord Feed Setup</h2>
-            <p class="discord-setup-info">
-                Create a Discord bot at <a id="discord-dev-link" href="#">developer portal</a>,
-                add it to your server with <strong>Read Message History</strong>,
-                <strong>Send Messages</strong>, and
-                <strong>View Channels</strong> permissions, then paste the bot token and
-                forum channel ID below.<br><br>
-                For user login, also copy the <strong>Client ID</strong> and <strong>Client Secret</strong>
-                from the OAuth2 section of your application, and add
-                <code style="background:rgba(0,0,0,0.3);padding:1px 4px;border-radius:3px;">http://localhost:18293/callback</code>
-                as a Redirect URI.
-            </p>
-            <div class="dialog-field">
-                <label>Bot Token</label>
-                <input type="password" id="discord-token-input" placeholder="Bot token..." autocomplete="off">
-            </div>
-            <div class="dialog-field">
-                <label>Forum Channel ID</label>
-                <input type="text" id="discord-channel-input" placeholder="e.g. 1234567890">
-            </div>
-            <div class="dialog-field">
-                <label>Client ID (for user login)</label>
-                <input type="text" id="discord-clientid-input" placeholder="Application Client ID">
-            </div>
-            <div class="dialog-field">
-                <label>Client Secret (for user login)</label>
-                <input type="password" id="discord-clientsecret-input" placeholder="Application Client Secret" autocomplete="off">
-            </div>
-            <div class="dialog-field">
-                <label style="display:flex;align-items:center;gap:8px;">
-                    <input type="checkbox" id="discord-enabled-input"> Enable Discord feed
-                </label>
-            </div>
-            <div class="dialog-buttons">
-                <button class="setup-btn-secondary" id="discord-setup-cancel">Cancel</button>
-                <button class="setup-btn-primary" id="discord-setup-save">Save</button>
-            </div>
-        </div>
-    `;
-    document.body.appendChild(overlay);
-
-    ipcRenderer.invoke(IPC.DISCORD_GET_CONFIG).then((config: any) => {
-        (document.getElementById('discord-channel-input') as HTMLInputElement).value = config.channelId || '';
-        (document.getElementById('discord-clientid-input') as HTMLInputElement).value = config.clientId || '';
-        (document.getElementById('discord-enabled-input') as HTMLInputElement).checked = config.enabled;
-    });
-
-    document.getElementById('discord-dev-link')!.addEventListener('click', (e) => {
-        e.preventDefault();
-        shell.openExternal('https://discord.com/developers/applications');
-    });
-
-    document.getElementById('discord-setup-cancel')!.addEventListener('click', () => overlay.remove());
-
-    document.getElementById('discord-setup-save')!.addEventListener('click', async () => {
-        const token = (document.getElementById('discord-token-input') as HTMLInputElement).value.trim();
-        const channelId = (document.getElementById('discord-channel-input') as HTMLInputElement).value.trim();
-        const clientId = (document.getElementById('discord-clientid-input') as HTMLInputElement).value.trim();
-        const clientSecret = (document.getElementById('discord-clientsecret-input') as HTMLInputElement).value.trim();
-        const enabled = (document.getElementById('discord-enabled-input') as HTMLInputElement).checked;
-
-        const config: any = { channelId, enabled };
-        if (token) config.botToken = token;
-        if (clientId) config.clientId = clientId;
-        if (clientSecret) config.clientSecret = clientSecret;
-
-        await ipcRenderer.invoke(IPC.DISCORD_CONFIGURE, config);
-        overlay.remove();
-        loadDiscordFeed(true);
-    });
-}
-
-function formatDiscordContent(content: string): string {
-    if (!content) return '';
-    let html = escapeHtml(content);
-    // Bold
-    html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-    // Italic
-    html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
-    // Inline code
-    html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
-    // Code blocks
-    html = html.replace(/```(\w*)\n?([\s\S]*?)```/g, '<pre class="msg-codeblock"><code>$2</code></pre>');
-    // Line breaks
-    html = html.replace(/\n/g, '<br>');
-    return html;
-}
-
-function formatTimeAgo(dateStr: string): string {
-    const d = new Date(dateStr);
-    const now = Date.now();
-    const diff = now - d.getTime();
-    const mins = Math.floor(diff / 60000);
-    if (mins < 1) return 'just now';
-    if (mins < 60) return `${mins}m ago`;
-    const hours = Math.floor(mins / 60);
-    if (hours < 24) return `${hours}h ago`;
-    const days = Math.floor(hours / 24);
-    if (days < 30) return `${days}d ago`;
-    return d.toLocaleDateString();
-}
-
-function formatFileSize(bytes: number): string {
-    if (bytes < 1024) return bytes + ' B';
-    if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
-    return (bytes / 1048576).toFixed(1) + ' MB';
-}
-
-function escapeHtml(str: string): string {
-    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-}
 
 // ══════════════════════════════════════
 //  CODE-ALONG HELPER
@@ -4514,358 +4358,33 @@ $('code-helper-insert').addEventListener('click', () => {
 });
 
 // ══════════════════════════════════════
-//  PROJECT EXPORT / IMPORT
+//  PROJECT EXPORT — Extracted to editor/projectExport.ts
 // ══════════════════════════════════════
-async function exportProject() {
-    if (!currentProject) { appendOutput('No project open to export.\n'); return; }
-    try {
-        const archiver = require('archiver');
-        // Fallback: use a simple zip via child_process
-    } catch {}
-    // Use IPC to call main process for zipping
-    const result = await ipcRenderer.invoke(IPC.PROJECT_EXPORT);
-    if (result) appendOutput(`📦 Project exported to: ${result}\n`);
-}
-
-async function importProject() {
-    const result = await ipcRenderer.invoke(IPC.PROJECT_IMPORT);
-    if (result) {
-        appendOutput(`📦 Project imported: ${result}\n`);
-        openProject(result);
-    }
-}
-
-async function uploadDocument() {
-    if (!currentProject) { appendOutput('Open a project first.\n'); return; }
-    const filePath = await ipcRenderer.invoke(IPC.FILE_SELECT_FILE);
-    if (!filePath) return;
-    const fileName = nodePath.basename(filePath);
-    const docsDir = nodePath.join(currentProject.path, 'Documents');
-    try {
-        nodeFs.mkdirSync(docsDir, { recursive: true });
-        nodeFs.copyFileSync(filePath, nodePath.join(docsDir, fileName));
-        await refreshFileTree();
-        appendOutput(`📄 Uploaded document: ${fileName}\n`);
-    } catch (err: any) { appendOutput(`Upload failed: ${err.message}\n`); }
-}
-
-// Wire menu items
+const { initProjectExport, exportProject, importProject, uploadDocument } = require('./editor/projectExport');
+initProjectExport({
+    appendOutput,
+    getCurrentProject: () => currentProject,
+    refreshFileTree,
+    openProject,
+});
 menuAction('menu-export', exportProject);
 menuAction('menu-import', importProject);
 menuAction('menu-upload-doc', uploadDocument);
 
 // ══════════════════════════════════════
-//  GIT INTEGRATION
+//  GIT — Extracted to git.ts
 // ══════════════════════════════════════
-const { execSync } = require('child_process');
-
-function gitExec(cmd: string): string {
-    if (!currentProject) throw new Error('No project open');
-    try {
-        return execSync(cmd, { cwd: currentProject.path, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
-    } catch (err: any) {
-        throw new Error(err.stderr || err.message);
-    }
-}
-
-menuAction('menu-git-init', () => {
-    if (!currentProject) { appendOutput('No project open.\n'); return; }
-    try {
-        gitExec('git init');
-        gitExec('git add -A');
-        gitExec('git commit -m "Initial commit — Nexia IDE project"');
-        appendOutput('✅ Git repository initialized and first commit created.\n');
-    } catch (err: any) { appendOutput(`Git init failed: ${err.message}\n`); }
-});
-
-menuAction('menu-git-commit', () => {
-    if (!currentProject) { appendOutput('No project open.\n'); return; }
-    const msg = prompt('Commit message:', 'Update project');
-    if (!msg) return;
-    try {
-        gitExec('git add -A');
-        const result = gitExec(`git commit -m "${msg.replace(/"/g, '\\"')}"`);
-        appendOutput(`✅ ${result}\n`);
-    } catch (err: any) { appendOutput(`Git commit failed: ${err.message}\n`); }
-});
-
-menuAction('menu-git-push', () => {
-    if (!currentProject) { appendOutput('No project open.\n'); return; }
-    try {
-        appendOutput('Pushing to remote...\n');
-        const result = gitExec('git push');
-        appendOutput(`✅ ${result || 'Push complete.'}\n`);
-    } catch (err: any) { appendOutput(`Git push failed: ${err.message}\n`); }
-});
-
-menuAction('menu-git-setup', () => {
-    if (!currentProject) { appendOutput('No project open.\n'); return; }
-    const url = prompt('Enter Git remote URL (e.g. https://github.com/user/repo.git):');
-    if (!url) return;
-    try {
-        try { gitExec(`git remote remove origin`); } catch {}
-        gitExec(`git remote add origin ${url}`);
-        appendOutput(`✅ Remote set to: ${url}\n`);
-    } catch (err: any) { appendOutput(`Git setup failed: ${err.message}\n`); }
-});
-
+const { initGit, gitInit, gitCommit, gitPush, gitSetRemote, renderGitPanel } = require('./git');
+initGit({ $: (id: string) => document.getElementById(id)!, getCurrentProject: () => currentProject, appendOutput });
+menuAction('menu-git-init', gitInit);
+menuAction('menu-git-commit', gitCommit);
+menuAction('menu-git-push', gitPush);
+menuAction('menu-git-setup', gitSetRemote);
 // ══════════════════════════════════════
-//  FIND IN FILES (Ctrl+Shift+F)
+//  FIND IN FILES — Extracted to editor/searchPanel.ts
 // ══════════════════════════════════════
-let searchDebounceTimer: any = null;
+const { triggerSearch, openFindInFiles } = require('./editor/searchPanel');
 
-const SEARCH_BINARY_EXT = new Set([
-    '.exe', '.xex', '.dll', '.obj', '.o', '.pdb', '.lib', '.xbe',
-    '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.ico', '.dds', '.tga',
-    '.wav', '.mp3', '.ogg', '.xma', '.wma',
-    '.zip', '.rar', '.7z', '.cab',
-    '.xbf', '.xuiobj',
-]);
-
-const SEARCH_MAX_FILE_SIZE = 2 * 1024 * 1024; // 2MB
-const SEARCH_MAX_RESULTS = 5000;
-
-interface SearchMatch {
-    file: string;
-    relPath: string;
-    line: number;
-    column: number;
-    lineText: string;
-    matchStart: number;
-    matchEnd: number;
-}
-
-function getSearchableFiles(dir: string, includeGlobs: string[]): string[] {
-    const files: string[] = [];
-    const walk = (d: string) => {
-        try {
-            const entries = nodeFs.readdirSync(d, { withFileTypes: true });
-            for (const entry of entries) {
-                const fullPath = nodePath.join(d, entry.name);
-                if (entry.isDirectory()) {
-                    // Skip common non-source dirs
-                    if (['node_modules', '.git', 'out', 'obj', 'Debug', 'Release', 'Profile', '.vs'].includes(entry.name)) continue;
-                    walk(fullPath);
-                } else if (entry.isFile()) {
-                    const ext = nodePath.extname(entry.name).toLowerCase();
-                    if (SEARCH_BINARY_EXT.has(ext)) continue;
-                    try {
-                        const stat = nodeFs.statSync(fullPath);
-                        if (stat.size > SEARCH_MAX_FILE_SIZE) continue;
-                    } catch { continue; }
-
-                    // Apply include filter
-                    if (includeGlobs.length > 0) {
-                        const matchesInclude = includeGlobs.some(g => {
-                            // Simple glob: *.cpp → endsWith .cpp
-                            if (g.startsWith('*.')) return entry.name.endsWith(g.slice(1));
-                            return entry.name === g || entry.name.includes(g);
-                        });
-                        if (!matchesInclude) continue;
-                    }
-
-                    files.push(fullPath);
-                }
-            }
-        } catch {}
-    };
-    walk(dir);
-    return files;
-}
-
-function searchInFiles(query: string, caseSensitive: boolean, useRegex: boolean, includeFilter: string): SearchMatch[] {
-    if (!currentProject || !query) return [];
-
-    const includeGlobs = includeFilter.split(',').map(s => s.trim()).filter(Boolean);
-    const files = getSearchableFiles(currentProject.path, includeGlobs);
-    const results: SearchMatch[] = [];
-
-    let re: RegExp;
-    try {
-        const flags = caseSensitive ? 'g' : 'gi';
-        re = useRegex ? new RegExp(query, flags) : new RegExp(escapeRegExp(query), flags);
-    } catch {
-        return []; // Invalid regex
-    }
-
-    for (const file of files) {
-        if (results.length >= SEARCH_MAX_RESULTS) break;
-        try {
-            const content = nodeFs.readFileSync(file, 'utf-8');
-            const lines = content.split('\n');
-            for (let i = 0; i < lines.length; i++) {
-                if (results.length >= SEARCH_MAX_RESULTS) break;
-                re.lastIndex = 0;
-                let match: RegExpExecArray | null;
-                while ((match = re.exec(lines[i])) !== null) {
-                    results.push({
-                        file,
-                        relPath: nodePath.relative(currentProject.path, file),
-                        line: i + 1,
-                        column: match.index + 1,
-                        lineText: lines[i],
-                        matchStart: match.index,
-                        matchEnd: match.index + match[0].length,
-                    });
-                    if (!re.global) break;
-                    // Prevent infinite loop on zero-length matches
-                    if (match[0].length === 0) re.lastIndex++;
-                }
-            }
-        } catch {}
-    }
-    return results;
-}
-
-function escapeRegExp(s: string) {
-    return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-function renderSearchResults(results: SearchMatch[]) {
-    const container = $('search-results');
-    const summary = $('search-summary');
-    container.innerHTML = '';
-
-    if (results.length === 0) {
-        const query = ($('search-query') as HTMLInputElement).value;
-        if (query) {
-            summary.textContent = 'No results found';
-        } else {
-            summary.textContent = '';
-        }
-        return;
-    }
-
-    // Group by file
-    const groups = new Map<string, SearchMatch[]>();
-    for (const r of results) {
-        const arr = groups.get(r.file) || [];
-        arr.push(r);
-        groups.set(r.file, arr);
-    }
-
-    const fileCount = groups.size;
-    const matchCount = results.length;
-    summary.textContent = `${matchCount}${matchCount >= SEARCH_MAX_RESULTS ? '+' : ''} result${matchCount !== 1 ? 's' : ''} in ${fileCount} file${fileCount !== 1 ? 's' : ''}`;
-
-    for (const [file, matches] of groups) {
-        const group = document.createElement('div');
-        group.className = 'search-file-group';
-
-        const relPath = matches[0].relPath;
-        const fileName = nodePath.basename(file);
-        const dirPart = nodePath.dirname(relPath);
-
-        // File header
-        const header = document.createElement('div');
-        header.className = 'search-file-header';
-        header.innerHTML = `<span class="search-file-arrow">▼</span><span>📄 ${fileName}</span><span style="color:var(--text-dim);font-weight:normal;font-size:10px;margin-left:4px;">${dirPart !== '.' ? dirPart : ''}</span><span class="search-file-count">${matches.length}</span>`;
-
-        const matchesContainer = document.createElement('div');
-        matchesContainer.className = 'search-file-matches';
-
-        header.addEventListener('click', () => {
-            header.classList.toggle('collapsed');
-            matchesContainer.style.display = header.classList.contains('collapsed') ? 'none' : 'block';
-        });
-
-        // Match lines
-        for (const m of matches) {
-            const line = document.createElement('div');
-            line.className = 'search-match-line';
-
-            const lineNum = document.createElement('span');
-            lineNum.className = 'search-line-num';
-            lineNum.textContent = String(m.line);
-
-            const lineText = document.createElement('span');
-            lineText.className = 'search-line-text';
-
-            // Trim and highlight
-            const text = m.lineText;
-            const trimStart = Math.max(0, m.matchStart - 40);
-            const trimEnd = Math.min(text.length, m.matchEnd + 80);
-            const prefix = (trimStart > 0 ? '…' : '') + escapeHtml(text.slice(trimStart, m.matchStart));
-            const matched = escapeHtml(text.slice(m.matchStart, m.matchEnd));
-            const suffix = escapeHtml(text.slice(m.matchEnd, trimEnd)) + (trimEnd < text.length ? '…' : '');
-            lineText.innerHTML = `${prefix}<span class="search-highlight">${matched}</span>${suffix}`;
-
-            line.appendChild(lineNum);
-            line.appendChild(lineText);
-            line.addEventListener('click', () => {
-                jumpToError({ file: m.file, line: m.line, column: m.column });
-            });
-            matchesContainer.appendChild(line);
-        }
-
-        group.appendChild(header);
-        group.appendChild(matchesContainer);
-        container.appendChild(group);
-    }
-}
-
-function triggerSearch() {
-    const query = ($('search-query') as HTMLInputElement).value;
-    const caseSensitive = ($('search-case') as HTMLInputElement).checked;
-    const useRegex = ($('search-regex') as HTMLInputElement).checked;
-    const include = ($('search-include') as HTMLInputElement).value;
-
-    if (!query || !currentProject) {
-        $('search-results').innerHTML = '';
-        $('search-summary').textContent = '';
-        return;
-    }
-
-    const results = searchInFiles(query, caseSensitive, useRegex, include);
-    renderSearchResults(results);
-}
-
-// Debounced search on input
-$('search-query').addEventListener('input', () => {
-    clearTimeout(searchDebounceTimer);
-    searchDebounceTimer = setTimeout(triggerSearch, 300);
-});
-
-// Re-search when options change
-$('search-case').addEventListener('change', triggerSearch);
-$('search-regex').addEventListener('change', triggerSearch);
-$('search-include').addEventListener('input', () => {
-    clearTimeout(searchDebounceTimer);
-    searchDebounceTimer = setTimeout(triggerSearch, 400);
-});
-
-// Enter in search box triggers immediate search
-$('search-query').addEventListener('keydown', (e: KeyboardEvent) => {
-    if (e.key === 'Enter') {
-        clearTimeout(searchDebounceTimer);
-        triggerSearch();
-    }
-    if (e.key === 'Escape') {
-        ($('search-query') as HTMLInputElement).blur();
-    }
-});
-
-// Toggle replace input
-$('search-show-replace').addEventListener('change', () => {
-    const show = ($('search-show-replace') as HTMLInputElement).checked;
-    $('search-replace').classList.toggle('hidden', !show);
-});
-
-function openFindInFiles() {
-    // Show sidebar if hidden
-    if (!sidebarVisible) toggleSidebar();
-    // Switch to search tab
-    const tab = document.querySelector('.sidebar-tab[data-panel="search"]') as HTMLElement;
-    if (tab) tab.click();
-    // Focus search input and select all text
-    setTimeout(() => {
-        const input = $('search-query') as HTMLInputElement;
-        input.focus();
-        input.select();
-    }, 50);
-}
-
-// ══════════════════════════════════════
 //  EDITOR ZOOM — Ctrl+Scroll, Ctrl+Plus/Minus, Ctrl+0
 // ══════════════════════════════════════
 
@@ -4910,9 +4429,9 @@ document.addEventListener('keydown', (e) => {
     }
     if (e.key === 'F5') {
         e.preventDefault();
-        if (lastBuiltXex && devkitConnected) {
+        if (lastBuiltXex && isDevkitConnected()) {
             ipcRenderer.invoke(IPC.DEVKIT_DEPLOY, lastBuiltXex);
-        } else if (!devkitConnected) {
+        } else if (!isDevkitConnected()) {
             appendOutput('No console connected. Connect in the Devkit panel first.\n');
         } else {
             appendOutput('No XEX built yet. Build first (F7), then deploy (F5).\n');
@@ -4978,1526 +4497,257 @@ function renderRecentProjects(recent: string[]) {
 //  INIT
 // ══════════════════════════════════════
 // ══════════════════════════════════════════════════════════════════════
-// NEXIA AI — Multi-provider AI assistant
+// NEXIA AI — Extracted to ai/aiService.ts
 // ══════════════════════════════════════════════════════════════════════
+const aiService = require('./ai/aiService');
+const { aiComplete, sendAIMessage, analyzeAIBuildErrors, switchToAIPanel,
+        switchAIMode, setAIContext, triggerInlineSuggestion, updateBreadcrumb,
+        initAI, initAIHintBar, addAIContextMenuItems, openAISettings,
+        clearAIChat, renderMarkdown,
+        tutorOnLessonComplete, tutorOnQuizFail, tutorOnSessionReturn, tutorOnBuildError } = aiService;
 
-const XBOX360_SYSTEM_PROMPT = `You are Nexia AI, an expert Xbox 360 development assistant built into the Nexia IDE. You have deep knowledge of:
-- Xbox 360 SDK (XDK) APIs, D3D9 on Xbox 360, XAudio2, XACT, XInput
-- PowerPC architecture (Xenon CPU), Xbox 360 GPU (Xenos/ATI)
-- XEX format, XAM.XEX system functions, Xbox 360 memory layout
-- C++ game programming, HLSL shaders, Xbox 360 performance optimization
-- RGH/JTAG development, homebrew development, devkit deployment
-- MSBuild for Xbox 360 projects, Xbox 360 SDK toolchain
-
-When generating code, always use Xbox 360 compatible APIs and patterns.
-Keep responses concise and code-focused. Use C++ unless asked otherwise.`;
-
-interface AIMessage {
-    role: 'user' | 'assistant' | 'system';
-    content: string;
-    timestamp: number;
-}
-
-let aiMessages: AIMessage[] = [];
-let aiStreaming = false;
-
-// ── AI networking via Node's https (bypasses CSP, uses exact URLs) ──
-const nodeHttps = require('https');
-const nodeHttp = require('http');
-const nodeUrl = require('url');
-const { marked } = require('marked');
-const hljs = require('highlight.js');
-
-// Configure marked with highlight.js for syntax highlighting in code blocks
-marked.setOptions({
-    highlight: (code: string, lang: string) => {
-        if (lang && hljs.getLanguage(lang)) {
-            try { return hljs.highlight(code, { language: lang }).value; } catch {}
-        }
-        try { return hljs.highlightAuto(code).value; } catch {}
-        return code;
-    },
-    breaks: true,
-    gfm: true,
+// Wire study panel deps (needs tutorOnQuizFail from aiService above)
+initStudy({
+    $, appendOutput,
+    getCurrentProject: () => currentProject,
+    getUserSettings: () => userSettings,
+    renderLearnPanel,
+    tutorOnQuizFail,
 });
+initStudyButtons();
 
-function renderMarkdown(text: string): string {
-    try { return marked.parse(text); }
-    catch { return text.replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>'); }
-}
+// ── AI Configuration Check ──
+let _aiToastShown = false;
 
-// Non-streaming request (error analysis, code gen, inline, test)
-function aiRequest(url: string, body: any, apiKey?: string): Promise<any> {
-    return new Promise((resolve, reject) => {
-        const parsed = new URL(url);
-        const isHttps = parsed.protocol === 'https:';
-        const lib = isHttps ? nodeHttps : nodeHttp;
-        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-        if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
-        const postData = JSON.stringify(body);
-        headers['Content-Length'] = Buffer.byteLength(postData).toString();
-        const req = lib.request({
-            hostname: parsed.hostname, port: parsed.port || (isHttps ? 443 : 80),
-            path: parsed.pathname + parsed.search, method: 'POST', headers,
-        }, (res: any) => {
-            let data = '';
-            res.on('data', (chunk: string) => data += chunk);
-            res.on('end', () => {
-                if (res.statusCode >= 400) { reject(new Error(`HTTP ${res.statusCode}: ${data.substring(0, 300)}`)); return; }
-                try { resolve(JSON.parse(data)); }
-                catch { reject(new Error('Invalid JSON response: ' + data.substring(0, 200))); }
-            });
-        });
-        req.on('error', reject);
-        req.setTimeout(120000, () => { req.destroy(); reject(new Error('Request timeout')); });
-        req.write(postData); req.end();
-    });
-}
+function checkAIConfiguration() {
+    const hasConfig = userSettings.aiApiKey || userSettings.aiProvider === 'local';
+    if (hasConfig || _aiToastShown) return;
+    _aiToastShown = true;
 
-function aiRequestRaw(url: string, body: any, headers: Record<string, string>): Promise<any> {
-    return new Promise((resolve, reject) => {
-        const parsed = new URL(url);
-        const isHttps = parsed.protocol === 'https:';
-        const lib = isHttps ? nodeHttps : nodeHttp;
-        const postData = JSON.stringify(body);
-        headers['Content-Length'] = Buffer.byteLength(postData).toString();
-        const req = lib.request({
-            hostname: parsed.hostname, port: parsed.port || (isHttps ? 443 : 80),
-            path: parsed.pathname + parsed.search, method: 'POST', headers,
-        }, (res: any) => {
-            let data = '';
-            res.on('data', (chunk: string) => data += chunk);
-            res.on('end', () => {
-                if (res.statusCode >= 400) { reject(new Error(`HTTP ${res.statusCode}: ${data.substring(0, 300)}`)); return; }
-                try { resolve(JSON.parse(data)); }
-                catch { reject(new Error('Invalid JSON response: ' + data.substring(0, 200))); }
-            });
-        });
-        req.on('error', reject);
-        req.setTimeout(120000, () => { req.destroy(); reject(new Error('Request timeout')); });
-        req.write(postData); req.end();
-    });
-}
+    const existing = document.getElementById('ai-config-toast');
+    if (existing) existing.remove();
 
-// ── SSE Streaming — parses Server-Sent Events, yields tokens to callback ──
-function aiStreamSSE(
-    url: string, body: any, headers: Record<string, string>,
-    onToken: (token: string) => void,
-    onDone: (fullText: string) => void,
-    onError: (err: Error) => void,
-): () => void {
-    const parsed = new URL(url);
-    const isHttps = parsed.protocol === 'https:';
-    const lib = isHttps ? nodeHttps : nodeHttp;
+    const toast = document.createElement('div');
+    toast.id = 'ai-config-toast';
+    toast.style.cssText = 'position:fixed;bottom:60px;left:50%;transform:translateX(-50%) translateY(20px);opacity:0;z-index:9999;background:#1e1e2e;border:1px solid #38bdf8;border-radius:8px;padding:14px 18px;max-width:420px;box-shadow:0 8px 32px rgba(0,0,0,0.5);transition:opacity 0.3s,transform 0.3s;font-family:var(--font);';
+    toast.innerHTML = `
+        <div style="display:flex;align-items:flex-start;gap:12px;">
+            <div style="font-size:24px;flex-shrink:0;margin-top:2px;color:#38bdf8;">🤖</div>
+            <div style="flex:1;">
+                <div style="font-size:13px;font-weight:600;color:#38bdf8;margin-bottom:4px;">AI Not Configured</div>
+                <div style="font-size:12px;color:#cccccc;line-height:1.5;margin-bottom:10px;">Nexia AI needs an API key to provide code assistance, error analysis, and code generation. Configure a provider to get started.</div>
+                <div style="display:flex;gap:8px;">
+                    <button id="ai-toast-configure" style="padding:6px 14px;background:#38bdf8;color:#1e1e2e;border:none;border-radius:4px;font-size:12px;font-weight:600;cursor:pointer;font-family:var(--font);">Configure AI</button>
+                    <button id="ai-toast-dismiss" style="padding:6px 12px;background:transparent;color:#858585;border:1px solid #404040;border-radius:4px;font-size:12px;cursor:pointer;font-family:var(--font);">Dismiss</button>
+                </div>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(toast);
+    requestAnimationFrame(() => { toast.style.opacity = '1'; toast.style.transform = 'translateX(-50%) translateY(0)'; });
 
-    body.stream = true;
-    const postData = JSON.stringify(body);
-    headers['Content-Length'] = Buffer.byteLength(postData).toString();
-    headers['Accept'] = 'text/event-stream';
-
-    let fullText = '';
-    let aborted = false;
-    let buffer = '';
-    let finished = false;
-
-    const finish = () => { if (!finished) { finished = true; onDone(fullText); } };
-
-    const req = lib.request({
-        hostname: parsed.hostname, port: parsed.port || (isHttps ? 443 : 80),
-        path: parsed.pathname + parsed.search, method: 'POST', headers,
-    }, (res: any) => {
-        if (res.statusCode >= 400) {
-            let errData = '';
-            res.on('data', (c: string) => errData += c);
-            res.on('end', () => onError(new Error(`HTTP ${res.statusCode}: ${errData.substring(0, 300)}`)));
-            return;
-        }
-        res.setEncoding('utf8');
-        res.on('data', (chunk: string) => {
-            if (aborted) return;
-            buffer += chunk;
-            const lines = buffer.split('\n');
-            buffer = lines.pop() || '';
-            for (const line of lines) {
-                const trimmed = line.trim();
-                if (!trimmed || trimmed.startsWith(':')) continue;
-                if (trimmed === 'data: [DONE]') { finish(); return; }
-                if (trimmed.startsWith('data: ')) {
-                    try {
-                        const obj = JSON.parse(trimmed.slice(6));
-                        const delta = obj.choices?.[0]?.delta?.content || obj.choices?.[0]?.text || '';
-                        if (delta) { fullText += delta; onToken(delta); }
-                    } catch {}
-                }
-            }
-        });
-        res.on('end', () => { if (!aborted) finish(); });
+    document.getElementById('ai-toast-configure')!.addEventListener('click', () => {
+        dismissAIToast(toast);
+        showSettingsPanel();
     });
 
-    req.on('error', (err: Error) => { if (!aborted) onError(err); });
-    req.setTimeout(120000, () => { req.destroy(); if (!aborted) onError(new Error('Stream timeout')); });
-    req.write(postData); req.end();
-
-    return () => { aborted = true; finished = true; req.destroy(); };
-}
-
-function getAIRequestURL(): string {
-    const s = userSettings;
-    switch (s.aiProvider) {
-        case 'anthropic': return 'https://api.anthropic.com/v1/messages';
-        case 'openai': return 'https://api.openai.com/v1/chat/completions';
-        case 'local': return s.aiEndpoint || 'http://localhost:11434/v1/chat/completions';
-        case 'custom': return s.aiEndpoint || 'http://localhost:8080/v1/chat/completions';
-        default: return s.aiEndpoint;
-    }
-}
-
-function getAIModel(): string {
-    const m = (userSettings.aiModel || '').trim();
-    if (m && m !== 'auto') return m;
-    const defaults: Record<string, string> = {
-        anthropic: 'claude-sonnet-4-20250514',
-        openai: 'gpt-4o',
-        local: 'llama3',
-        custom: '',
-    };
-    return defaults[userSettings.aiProvider] || '';
-}
-
-// ── Project Signature Scanner ──
-// Scans .h/.hpp/.cpp files for function, class, struct, enum, typedef, and #define signatures
-// to provide the LLM with codebase context for accurate completions
-
-let projectSignaturesCache: string = '';
-let projectSignaturesCacheTime: number = 0;
-const SIGNATURE_CACHE_TTL = 30000; // 30s — rescan after this
-
-function scanProjectSignatures(): string {
-    if (!currentProject?.path) return '';
-
-    // Use cache if fresh
-    const now = Date.now();
-    if (projectSignaturesCache && (now - projectSignaturesCacheTime) < SIGNATURE_CACHE_TTL) {
-        return projectSignaturesCache;
-    }
-
-    const srcDir = nodePath.join(currentProject.path, 'src');
-    const includeDir = nodePath.join(currentProject.path, 'include');
-    const signatures: string[] = [];
-    const scannedFiles: string[] = [];
-
-    function scanDir(dir: string) {
-        try {
-            if (!nodeFs.existsSync(dir)) return;
-            const entries = nodeFs.readdirSync(dir, { withFileTypes: true });
-            for (const entry of entries) {
-                const fullPath = nodePath.join(dir, entry.name);
-                if (entry.isDirectory()) {
-                    scanDir(fullPath);
-                } else {
-                    const ext = nodePath.extname(entry.name).toLowerCase();
-                    if (['.h', '.hpp', '.hxx', '.cpp', '.c', '.cc', '.cxx', '.hlsl'].includes(ext)) {
-                        scanFile(fullPath, entry.name);
-                    }
-                }
-            }
-        } catch {}
-    }
-
-    function scanFile(filePath: string, fileName: string) {
-        try {
-            const content = nodeFs.readFileSync(filePath, 'utf-8');
-            const lines = content.split('\n');
-            const fileSigs: string[] = [];
-
-            for (let i = 0; i < lines.length; i++) {
-                const line = lines[i].trim();
-
-                // Skip empty lines, comments, preprocessor guards
-                if (!line || line.startsWith('//') || line === '#pragma once' || line.startsWith('#ifndef') || line.startsWith('#define _') || line.startsWith('#endif')) continue;
-
-                // Function declarations/definitions: return_type name(params)
-                const funcMatch = line.match(/^(?:(?:static|inline|virtual|extern|__declspec\([^)]*\))\s+)*(\w[\w:*&<> ]*?)\s+(\w+)\s*\(([^)]*)\)\s*(?:const\s*)?(?:override\s*)?[;{]/);
-                if (funcMatch && !['if', 'while', 'for', 'switch', 'return', 'else', 'case'].includes(funcMatch[2])) {
-                    fileSigs.push(`${funcMatch[1]} ${funcMatch[2]}(${funcMatch[3].trim()})`);
-                    continue;
-                }
-
-                // Class/struct declarations
-                const classMatch = line.match(/^(?:class|struct)\s+(?:__declspec\([^)]*\)\s+)?(\w+)\s*(?::\s*(?:public|private|protected)\s+\w[\w:<> ]*)?(?:\s*\{)?/);
-                if (classMatch) {
-                    fileSigs.push(`${line.startsWith('struct') ? 'struct' : 'class'} ${classMatch[1]}`);
-                    continue;
-                }
-
-                // Enum declarations
-                const enumMatch = line.match(/^enum\s+(?:class\s+)?(\w+)/);
-                if (enumMatch) {
-                    fileSigs.push(`enum ${enumMatch[1]}`);
-                    continue;
-                }
-
-                // Typedef
-                if (line.startsWith('typedef ')) {
-                    const shortTypedef = line.length < 120 ? line.replace(/;$/, '') : line.substring(0, 120) + '...';
-                    fileSigs.push(shortTypedef);
-                    continue;
-                }
-
-                // #define macros (skip include guards)
-                const defineMatch = line.match(/^#define\s+(\w+)(?:\(([^)]*)\))?\s*(.*)/);
-                if (defineMatch && defineMatch[1] && !defineMatch[1].startsWith('_') && defineMatch[1] !== defineMatch[1].toUpperCase() + '_H') {
-                    const macro = defineMatch[2] !== undefined
-                        ? `#define ${defineMatch[1]}(${defineMatch[2]})`
-                        : `#define ${defineMatch[1]}`;
-                    fileSigs.push(macro);
-                    continue;
-                }
-
-                // Global variable declarations (extern)
-                if (line.startsWith('extern ') && line.endsWith(';')) {
-                    fileSigs.push(line.replace(/;$/, ''));
-                    continue;
-                }
-            }
-
-            if (fileSigs.length > 0) {
-                scannedFiles.push(fileName);
-                signatures.push(`// ${fileName}\n${fileSigs.join('\n')}`);
-            }
-        } catch {}
-    }
-
-    scanDir(srcDir);
-    scanDir(includeDir);
-    // Also scan root-level headers
-    try {
-        const rootEntries = nodeFs.readdirSync(currentProject.path);
-        for (const name of rootEntries) {
-            const ext = nodePath.extname(name).toLowerCase();
-            if (['.h', '.hpp'].includes(ext)) {
-                scanFile(nodePath.join(currentProject.path, name), name);
-            }
-        }
-    } catch {}
-
-    if (signatures.length === 0) return '';
-
-    // Truncate if too large (keep under ~4000 chars to not blow up context)
-    let result = signatures.join('\n\n');
-    if (result.length > 4000) {
-        result = result.substring(0, 4000) + '\n// ... (truncated, ' + scannedFiles.length + ' files scanned)';
-    }
-
-    projectSignaturesCache = result;
-    projectSignaturesCacheTime = now;
-    return result;
-}
-
-function getSystemPrompt(): string {
-    let prompt = XBOX360_SYSTEM_PROMPT;
-
-    // Inject project signatures
-    const sigs = scanProjectSignatures();
-    if (sigs) {
-        prompt += `\n\nThe user's current project contains the following declarations and signatures. Use these for accurate code completion, references, and suggestions:\n\n${sigs}`;
-    }
-
-    if (userSettings.aiSystemPrompt) {
-        prompt += '\n\n' + userSettings.aiSystemPrompt;
-    }
-    return prompt;
-}
-
-async function aiComplete(messages: { role: string; content: string }[]): Promise<string> {
-    const url = getAIRequestURL();
-    const s = userSettings;
-
-    if (s.aiProvider === 'anthropic') {
-        const body = {
-            model: getAIModel(),
-            max_tokens: 4096,
-            system: getSystemPrompt(),
-            messages,
-        };
-        const headers: Record<string, string> = {
-            'Content-Type': 'application/json',
-            'x-api-key': s.aiApiKey,
-            'anthropic-version': '2023-06-01',
-        };
-        const resp = await aiRequestRaw(url, body, headers);
-        return (resp.content || []).map((b: any) => b.text || '').join('');
-    } else {
-        const model = getAIModel();
-        const sysPrompt = getSystemPrompt();
-        const allMessages: any[] = [];
-        if (sysPrompt) allMessages.push({ role: 'system', content: sysPrompt });
-        allMessages.push(...messages);
-        const body: any = { messages: allMessages, max_tokens: 4096 };
-        if (model) body.model = model;
-        const resp = await aiRequest(url, body, s.aiApiKey || undefined);
-        return resp.choices?.[0]?.message?.content || '';
-    }
-}
-
-function setAIStatus(state: 'connected' | 'disconnected' | 'loading' | 'error', text?: string) {
-    const dot = $('ai-status-dot');
-    const txt = $('ai-status-text');
-    const label = $('ai-provider-label');
-    dot.className = 'ai-dot ' + state;
-    if (text) txt.textContent = text;
-    const providerNames: Record<string, string> = { anthropic: 'Claude', openai: 'GPT', local: 'Ollama', custom: 'Custom' };
-    label.textContent = userSettings.aiApiKey || userSettings.aiProvider === 'local' ? providerNames[userSettings.aiProvider] || '' : '';
-}
-
-let aiAbortStream: (() => void) | null = null;
-
-async function sendAIMessage(userText: string, contextCode?: string) {
-    if (!userText.trim() || aiStreaming) return;
-    if (!userSettings.aiApiKey && userSettings.aiProvider !== 'local' && userSettings.aiProvider !== 'custom') {
-        addAIMessage('system', '⚠ No API key configured. Click the ⚙ button to set up your AI provider.');
-        return;
-    }
-
-    let fullPrompt = userText;
-    if (contextCode) {
-        fullPrompt = `Here is the relevant code:\n\`\`\`cpp\n${contextCode}\n\`\`\`\n\n${userText}`;
-    } else if (userSettings.aiFileContext && editor) {
-        const currentCode = editor.getValue();
-        const currentTab = openTabs.find(t => t.path === activeTab);
-        if (currentCode && currentCode.length < 8000 && currentTab) {
-            fullPrompt = `I'm working on file "${currentTab?.name || 'unknown'}". Here's the current code:\n\`\`\`cpp\n${currentCode}\n\`\`\`\n\n${userText}`;
-        }
-    }
-
-    addAIMessage('user', userText);
-    showAITyping();
-    setAIStatus('loading', 'Thinking...');
-    aiStreaming = true;
-    ($('ai-send') as HTMLButtonElement).disabled = false;
-    $('ai-send').textContent = '↑';
-    $('ai-send').textContent = '■'; // Stop icon
-
-    const apiMessages = aiMessages
-        .filter(m => m.role !== 'system')
-        .map(m => ({ role: m.role, content: m.role === 'user' && m === aiMessages[aiMessages.length - 1] ? fullPrompt : m.content }));
-
-    const url = getAIRequestURL();
-    const s = userSettings;
-
-    // Build request body and headers based on provider
-    let body: any;
-    let headers: Record<string, string> = { 'Content-Type': 'application/json' };
-
-    if (s.aiProvider === 'anthropic') {
-        headers['x-api-key'] = s.aiApiKey;
-        headers['anthropic-version'] = '2023-06-01';
-        body = { model: getAIModel(), max_tokens: 4096, system: getSystemPrompt(), messages: apiMessages };
-        // Anthropic streaming uses a different SSE format — fall back to non-streaming for now
-        try {
-            const resp = await aiRequestRaw(url, body, headers);
-            const reply = (resp.content || []).map((b: any) => b.text || '').join('');
-            hideAITyping();
-            if (reply) { addAIMessage('assistant', reply); setAIStatus('connected', 'Ready'); }
-            else { addAIMessage('system', '⚠ Empty response.'); setAIStatus('error', 'Empty'); }
-        } catch (err: any) {
-            hideAITyping();
-            addAIMessage('system', `❌ Error: ${err.message}`);
-            setAIStatus('error', 'Failed');
-        }
-        aiStreaming = false;
-        ($('ai-send') as HTMLButtonElement).disabled = false;
-    $('ai-send').textContent = '↑';
-        return;
-    }
-
-    // OpenAI-compatible providers — use SSE streaming
-    if (s.aiApiKey) headers['Authorization'] = `Bearer ${s.aiApiKey}`;
-    const model = getAIModel();
-    const sysPrompt = getSystemPrompt();
-    const allMessages: any[] = [];
-    if (sysPrompt) allMessages.push({ role: 'system', content: sysPrompt });
-    allMessages.push(...apiMessages);
-    body = { messages: allMessages, max_tokens: 4096 };
-    if (model) body.model = model;
-
-    // Create the streaming message element
-    hideAITyping();
-    const streamMsg: AIMessage = { role: 'assistant', content: '', timestamp: Date.now() };
-    aiMessages.push(streamMsg);
-    const streamEl = createStreamingMessageEl();
-    const bodyEl = streamEl.querySelector('.ai-msg-body') as HTMLElement;
-
-    let tokenCount = 0;
-
-    aiAbortStream = aiStreamSSE(url, body, headers,
-        // onToken — live update
-        (token: string) => {
-            streamMsg.content += token;
-            tokenCount++;
-            // Re-render markdown every few tokens (throttled for performance)
-            if (tokenCount % 3 === 0 || token.includes('\n')) {
-                bodyEl.innerHTML = renderMarkdown(streamMsg.content);
-                addCopyButtonsToCodeBlocks(bodyEl);
-            }
-            streamEl.scrollIntoView({ behavior: 'auto', block: 'end' });
-            setAIStatus('loading', `Streaming... (${streamMsg.content.length} chars)`);
-        },
-        // onDone
-        (fullText: string) => {
-            streamMsg.content = fullText;
-            bodyEl.innerHTML = renderMarkdown(fullText);
-            addCopyButtonsToCodeBlocks(bodyEl);
-            // Remove streaming visual state
-            streamEl.classList.remove('ai-msg-streaming');
-            const badge = streamEl.querySelector('.ai-msg-streaming-badge');
-            if (badge) badge.remove();
-            // Add action buttons
-            addMessageActionButtons(streamEl, streamMsg);
-            streamEl.scrollIntoView({ behavior: 'smooth', block: 'end' });
-            setAIStatus('connected', 'Ready');
-            aiStreaming = false;
-            aiAbortStream = null;
-            ($('ai-send') as HTMLButtonElement).disabled = false;
-    $('ai-send').textContent = '↑';
-        },
-        // onError
-        (err: Error) => {
-            if (streamMsg.content) {
-                // Partial response — keep what we got
-                bodyEl.innerHTML = renderMarkdown(streamMsg.content);
-                addCopyButtonsToCodeBlocks(bodyEl);
-            } else {
-                streamEl.remove();
-                aiMessages.pop();
-            }
-            addAIMessage('system', `❌ Stream error: ${err.message}`);
-            setAIStatus('error', 'Stream failed');
-            aiStreaming = false;
-            aiAbortStream = null;
-            ($('ai-send') as HTMLButtonElement).disabled = false;
-    $('ai-send').textContent = '↑';
-        },
-    );
-}
-
-function createStreamingMessageEl(): HTMLElement {
-    const container = $('ai-messages');
-    const welcome = container.querySelector('.ai-welcome');
-    if (welcome) welcome.remove();
-
-    const el = document.createElement('div');
-    el.className = 'ai-msg ai-msg-streaming';
-    const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    el.innerHTML = `<div class="ai-msg-header"><span class="ai-msg-role assistant">Nexia AI</span><span class="ai-msg-streaming-badge">● streaming</span><span class="ai-msg-time">${time}</span></div><div class="ai-msg-body"><span class="ai-cursor-blink">▊</span></div>`;
-    container.appendChild(el);
-    el.scrollIntoView({ behavior: 'smooth', block: 'end' });
-    return el;
-}
-
-function addCopyButtonsToCodeBlocks(container: HTMLElement) {
-    container.querySelectorAll('pre').forEach(pre => {
-        if (pre.querySelector('.ai-code-copy')) return; // already has one
-        const copyBtn = document.createElement('button');
-        copyBtn.className = 'ai-code-copy';
-        copyBtn.textContent = '📋';
-        copyBtn.title = 'Copy code';
-        copyBtn.addEventListener('click', () => {
-            const code = pre.querySelector('code')?.textContent || pre.textContent || '';
-            navigator.clipboard.writeText(code);
-            copyBtn.textContent = '✓';
-            setTimeout(() => copyBtn.textContent = '📋', 1500);
-        });
-        pre.style.position = 'relative';
-        pre.appendChild(copyBtn);
-    });
-}
-
-function addAIMessage(role: 'user' | 'assistant' | 'system', content: string) {
-    const msg: AIMessage = { role, content, timestamp: Date.now() };
-    aiMessages.push(msg);
-    renderAIMessage(msg);
-}
-
-function addMessageActionButtons(el: HTMLElement, msg: AIMessage) {
-    const actions = document.createElement('div');
-    actions.className = 'ai-msg-actions';
-    actions.innerHTML = `<button class="ai-msg-action-btn" data-action="copy" title="Copy response">📋</button><button class="ai-msg-action-btn" data-action="edit" title="Edit response">✏️</button><button class="ai-msg-action-btn" data-action="retry" title="Retry">🔄</button>`;
-
-    actions.querySelector('[data-action="copy"]')!.addEventListener('click', () => {
-        navigator.clipboard.writeText(msg.content);
-        const btn = actions.querySelector('[data-action="copy"]')!;
-        btn.textContent = '✓';
-        setTimeout(() => btn.textContent = '📋', 1500);
+    document.getElementById('ai-toast-dismiss')!.addEventListener('click', () => {
+        dismissAIToast(toast);
     });
 
-    actions.querySelector('[data-action="edit"]')!.addEventListener('click', () => {
-        const bodyEl = el.querySelector('.ai-msg-body') as HTMLElement;
-        if (bodyEl.contentEditable === 'true') {
-            bodyEl.contentEditable = 'false';
-            bodyEl.classList.remove('ai-msg-editing');
-            msg.content = bodyEl.innerText;
-            bodyEl.innerHTML = renderMarkdown(msg.content);
-            addCopyButtonsToCodeBlocks(bodyEl);
-            actions.querySelector('[data-action="edit"]')!.textContent = '✏️';
-        } else {
-            bodyEl.contentEditable = 'true';
-            bodyEl.classList.add('ai-msg-editing');
-            bodyEl.innerText = msg.content;
-            bodyEl.focus();
-            actions.querySelector('[data-action="edit"]')!.textContent = '💾';
-        }
+    // Auto-dismiss after 12 seconds
+    setTimeout(() => { if (toast.parentNode) dismissAIToast(toast); }, 12000);
+}
+
+function dismissAIToast(toast: HTMLElement) {
+    toast.style.opacity = '0';
+    toast.style.transform = 'translateX(-50%) translateY(20px)';
+    setTimeout(() => toast.remove(), 300);
+}
+
+// ── Git Configuration Check ──
+let _gitToastShown = false;
+
+function checkGitConfiguration() {
+    // Only show when on the GitHub sub-tab and not signed into Nexia
+    if (_gitToastShown) return;
+    if (authService.isLoggedIn()) return; // Nexia account present — GitHub features available
+
+    _gitToastShown = true;
+
+    const existing = document.getElementById('git-config-toast');
+    if (existing) existing.remove();
+
+    const toast = document.createElement('div');
+    toast.id = 'git-config-toast';
+    toast.style.cssText = 'position:fixed;bottom:60px;left:50%;transform:translateX(-50%) translateY(20px);opacity:0;z-index:9999;background:#1e1e2e;border:1px solid #f472b6;border-radius:8px;padding:14px 18px;max-width:420px;box-shadow:0 8px 32px rgba(0,0,0,0.5);transition:opacity 0.3s,transform 0.3s;font-family:var(--font);';
+    toast.innerHTML = `
+        <div style="display:flex;align-items:flex-start;gap:12px;">
+            <div style="font-size:24px;flex-shrink:0;margin-top:2px;color:#f472b6;">🔀</div>
+            <div style="flex:1;">
+                <div style="font-size:13px;font-weight:600;color:#f472b6;margin-bottom:4px;">GitHub Integration</div>
+                <div style="font-size:12px;color:#cccccc;line-height:1.5;margin-bottom:10px;">Sign in to your Nexia account to link GitHub, push/pull repos, and manage files directly from the IDE. Local Git features work without signing in.</div>
+                <div style="display:flex;gap:8px;">
+                    <button id="git-toast-signin" style="padding:6px 14px;background:#f472b6;color:white;border:none;border-radius:4px;font-size:12px;font-weight:600;cursor:pointer;font-family:var(--font);">Sign In to Nexia</button>
+                    <button id="git-toast-dismiss" style="padding:6px 12px;background:transparent;color:#858585;border:1px solid #404040;border-radius:4px;font-size:12px;cursor:pointer;font-family:var(--font);">Dismiss</button>
+                </div>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(toast);
+    requestAnimationFrame(() => { toast.style.opacity = '1'; toast.style.transform = 'translateX(-50%) translateY(0)'; });
+
+    document.getElementById('git-toast-signin')!.addEventListener('click', () => {
+        dismissGenericToast(toast);
+        authUI.showLogin();
+    });
+    document.getElementById('git-toast-dismiss')!.addEventListener('click', () => {
+        dismissGenericToast(toast);
     });
 
-    actions.querySelector('[data-action="retry"]')!.addEventListener('click', () => {
-        retryAIMessage(msg, el);
-    });
-
-    el.appendChild(actions);
+    setTimeout(() => { if (toast.parentNode) dismissGenericToast(toast); }, 12000);
 }
 
-function renderAIMessage(msg: AIMessage) {
-    const container = $('ai-messages');
-    const welcome = container.querySelector('.ai-welcome');
-    if (welcome) welcome.remove();
+// ── Devkit Configuration Check ──
+// (Hint is rendered inline in devkitPanel.ts — no floating toast needed)
+function checkDevkitConfiguration() {}
 
-    const el = document.createElement('div');
-    el.className = 'ai-msg';
-    const time = new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    const roleLabel = msg.role === 'user' ? 'You' : msg.role === 'assistant' ? 'Nexia AI' : 'System';
-
-    el.innerHTML = `<div class="ai-msg-header"><span class="ai-msg-role ${msg.role}">${roleLabel}</span><span class="ai-msg-time">${time}</span></div><div class="ai-msg-body"></div>`;
-
-    const body = el.querySelector('.ai-msg-body')!;
-    body.innerHTML = renderMarkdown(msg.content);
-    addCopyButtonsToCodeBlocks(body as HTMLElement);
-
-    // Action buttons for assistant messages
-    if (msg.role === 'assistant') {
-        addMessageActionButtons(el, msg);
-    }
-
-    container.appendChild(el);
-    el.scrollIntoView({ behavior: 'smooth', block: 'end' });
+function dismissGenericToast(toast: HTMLElement) {
+    toast.style.opacity = '0';
+    toast.style.transform = 'translateX(-50%) translateY(20px)';
+    setTimeout(() => toast.remove(), 300);
 }
 
-function retryAIMessage(msg: AIMessage, msgEl: HTMLElement) {
-    if (aiStreaming) return;
-
-    // Find the user message that preceded this assistant response
-    const msgIdx = aiMessages.indexOf(msg);
-    if (msgIdx < 0) return;
-
-    // Walk backwards to find the preceding user message
-    let userMsg: AIMessage | null = null;
-    for (let i = msgIdx - 1; i >= 0; i--) {
-        if (aiMessages[i].role === 'user') {
-            userMsg = aiMessages[i];
-            break;
-        }
-    }
-
-    if (!userMsg) return;
-
-    // Remove the assistant message from array and DOM
-    aiMessages.splice(msgIdx, 1);
-    msgEl.remove();
-
-    // Also remove the user message from array and DOM
-    const userIdx = aiMessages.indexOf(userMsg);
-    if (userIdx >= 0) {
-        aiMessages.splice(userIdx, 1);
-        // Find and remove the user message DOM element
-        const allMsgEls = $('ai-messages').querySelectorAll('.ai-msg');
-        allMsgEls.forEach(el => {
-            const roleEl = el.querySelector('.ai-msg-role');
-            if (roleEl?.classList.contains('user') && el.querySelector('.ai-msg-body')?.textContent?.trim() === userMsg!.content.trim()) {
-                el.remove();
-            }
-        });
-    }
-
-    // Resend the original user message
-    sendAIMessage(userMsg.content);
-}
-
-function formatAIContent(text: string): string {
-    return renderMarkdown(text);
-}
-
-function showAITyping() {
-    // Auto-switch to AI panel so user sees the response
-    const aiTab = document.querySelector('[data-panel="ai"]') as HTMLElement;
-    if (aiTab && !aiTab.classList.contains('active')) aiTab.click();
-
-    const container = $('ai-messages');
-    const el = document.createElement('div');
-    el.className = 'ai-typing';
-    el.id = 'ai-typing-indicator';
-    el.innerHTML = '<div class="ai-typing-dots"><span class="ai-typing-dot"></span><span class="ai-typing-dot"></span><span class="ai-typing-dot"></span></div><span class="ai-typing-label">Nexia AI is thinking...</span>';
-    container.appendChild(el);
-    el.scrollIntoView({ behavior: 'smooth', block: 'end' });
-}
-
-function hideAITyping() {
-    const el = document.getElementById('ai-typing-indicator');
-    if (el) el.remove();
-}
-
-function clearAIChat() {
-    aiMessages = [];
-    const container = $('ai-messages');
-    container.innerHTML = `<div class="ai-welcome"><div class="ai-welcome-icon">🤖</div><div class="ai-welcome-title">Nexia AI</div><div class="ai-welcome-desc">Your Xbox 360 development assistant. Ask questions about XDK APIs, debug build errors, or generate code.</div><div class="ai-quick-actions"><button class="ai-quick-btn" data-prompt="Explain the Xbox 360 D3D initialization process">📖 D3D Init Guide</button><button class="ai-quick-btn" data-prompt="Show me a basic Xbox 360 input polling loop">🎮 Input Polling</button><button class="ai-quick-btn" data-prompt="How do I set up audio using XAudio2 on Xbox 360?">🔊 Audio Setup</button><button class="ai-quick-btn" data-prompt="What are common Xbox 360 build errors and how to fix them?">🔧 Build Errors</button></div></div>`;
-}
-
-// ── AI Error Analysis ──
-
-async function analyzeAIBuildErrors(errors: any[], warnings: any[]) {
-    if (!userSettings.aiAutoErrors) return;
-    if (!userSettings.aiApiKey && userSettings.aiProvider !== 'local') return;
-    if (errors.length === 0) return;
-
-    const errorsView = $('ai-errors-content');
-    const emptyView = $('ai-errors-empty');
-    const summary = $('ai-errors-summary');
-    const list = $('ai-errors-list');
-
-    emptyView.classList.add('hidden');
-    errorsView.classList.remove('hidden');
-    summary.innerHTML = `<strong>🔴 ${errors.length} error${errors.length > 1 ? 's' : ''}</strong>${warnings.length ? `, ⚠ ${warnings.length} warning${warnings.length > 1 ? 's' : ''}` : ''} — analyzing...`;
-    list.innerHTML = '<div class="ai-typing" style="padding:16px;"><div class="ai-typing-dots"><span class="ai-typing-dot"></span><span class="ai-typing-dot"></span><span class="ai-typing-dot"></span></div><span class="ai-typing-label">Analyzing errors...</span></div>';
-
-    // Update the AI tab badge
-    const aiTab = document.querySelector('[data-panel="ai"]');
-    if (aiTab) aiTab.setAttribute('data-badge', String(errors.length));
-
-    const errorText = errors.map(e => `${e.file || '?'}:${e.line || '?'}: ${e.message}`).join('\n');
-    const warningText = warnings.map(w => `${w.file || '?'}:${w.line || '?'}: ${w.message}`).join('\n');
-
-    // Get current file content for context
-    let codeContext = '';
-    if (editor && errors[0]?.file) {
-        const code = editor.getValue();
-        if (code.length < 6000) codeContext = `\nCurrent file content:\n\`\`\`cpp\n${code}\n\`\`\``;
-    }
-
-    const prompt = `Analyze these Xbox 360 build errors and provide a fix for each one. Be concise.
-${codeContext}
-
-ERRORS:
-${errorText}
-${warningText ? '\nWARNINGS:\n' + warningText : ''}
-
-For each error, respond with:
-1. What caused it (one sentence)
-2. How to fix it (specific code change)`;
-
-    try {
-        const reply = await aiComplete([{ role: 'user', content: prompt }]);
-
-        summary.innerHTML = `<strong>🔴 ${errors.length} error${errors.length > 1 ? 's' : ''}</strong>${warnings.length ? `, ⚠ ${warnings.length} warning${warnings.length > 1 ? 's' : ''}` : ''} — AI analysis complete`;
-        list.innerHTML = '';
-
-        const analysisEl = document.createElement('div');
-        analysisEl.className = 'ai-error-item';
-        analysisEl.innerHTML = `<div class="ai-msg-body">${formatAIContent(reply)}</div>`;
-        list.appendChild(analysisEl);
-
-    } catch (err: any) {
-        summary.innerHTML = `<strong>🔴 ${errors.length} error${errors.length > 1 ? 's' : ''}</strong> — analysis failed`;
-        list.innerHTML = `<div class="ai-error-item"><div class="ai-error-item-explanation">❌ Could not analyze: ${err.message}</div></div>`;
-    }
-}
-
-// ── AI Code Generation ──
-
-async function generateAICode() {
-    const prompt = ($('ai-gen-prompt') as HTMLTextAreaElement).value.trim();
-    if (!prompt) return;
-    if (!userSettings.aiApiKey && userSettings.aiProvider !== 'local') {
-        alert('No API key configured. Open AI Settings first.');
-        return;
-    }
-
-    const addComments = ($('ai-gen-comments') as HTMLInputElement).checked;
-    const addIncludes = ($('ai-gen-includes') as HTMLInputElement).checked;
-    const addErrorHandling = ($('ai-gen-error-handling') as HTMLInputElement).checked;
-
-    const genBtn = $('ai-gen-submit') as HTMLButtonElement;
-    genBtn.disabled = true;
-    genBtn.textContent = '⏳ Generating...';
-    $('ai-gen-result').classList.add('hidden');
-
-    const fullPrompt = `Generate Xbox 360 C++ code for the following request. Return ONLY the code, no explanation.
-${addComments ? 'Add clear comments.' : 'Minimal comments.'}
-${addIncludes ? 'Include all necessary #include directives.' : 'Do not include #include directives.'}
-${addErrorHandling ? 'Add proper error handling (HRESULT checks, null checks).' : 'Skip error handling for brevity.'}
-
-Request: ${prompt}`;
-
-    try {
-        let reply = await aiComplete([{ role: 'user', content: fullPrompt }]);
-
-        // Strip markdown code fences if present
-        reply = reply.replace(/^```[\w]*\n?/, '').replace(/\n?```$/, '').trim();
-
-        $('ai-gen-code-text').textContent = reply;
-        $('ai-gen-result').classList.remove('hidden');
-    } catch (err: any) {
-        alert('Generation failed: ' + err.message);
-    } finally {
-        genBtn.disabled = false;
-        genBtn.textContent = '⚡ Generate Code';
-    }
-}
-
-// ── AI Inline Suggestions ──
-
-let inlineSuggestTimer: any = null;
-
-function triggerInlineSuggestion() {
-    if (!userSettings.aiInlineSuggest || !userSettings.aiApiKey) return;
-    if (!editor) return;
-
-    clearTimeout(inlineSuggestTimer);
-    inlineSuggestTimer = setTimeout(async () => {
-        const pos = editor.getPosition();
-        if (!pos) return;
-        const model = editor.getModel();
-        if (!model) return;
-
-        // Get surrounding code context
-        const startLine = Math.max(1, pos.lineNumber - 20);
-        const endLine = pos.lineNumber;
-        const codeAbove = model.getValueInRange({ startLineNumber: startLine, startColumn: 1, endLineNumber: endLine, endColumn: pos.column });
-        const currentLine = model.getLineContent(pos.lineNumber);
-
-        // Only suggest if the line is non-empty and we're at the end
-        if (!currentLine.trim() || pos.column < currentLine.length) return;
-
-        try {
-            let suggestion = await aiComplete([{
-                role: 'user',
-                content: `Complete the following Xbox 360 C++ code. Return ONLY the completion (the next 1-5 lines), nothing else. No explanation.\n\n${codeAbove}`,
-            }]);
-
-            suggestion = suggestion.replace(/^```[\w]*\n?/, '').replace(/\n?```$/, '').trim();
-            if (!suggestion) return;
-
-            showInlineSuggestion(suggestion, pos);
-        } catch {}
-    }, 1500); // 1.5s debounce
-}
-
-function showInlineSuggestion(text: string, position: any) {
-    const widget = $('ai-inline-widget');
-    $('ai-inline-text').textContent = text;
-    widget.classList.remove('hidden');
-
-    // Position near cursor
-    const editorDom = $('editor-container');
-    const rect = editorDom.getBoundingClientRect();
-    const coords = editor.getScrolledVisiblePosition(position);
-    if (coords) {
-        widget.style.left = Math.min(rect.left + coords.left, window.innerWidth - 520) + 'px';
-        widget.style.top = (rect.top + coords.top + 20) + 'px';
-    }
-
-    (window as any).__aiInlineSuggestion = text;
-}
-
-function acceptInlineSuggestion() {
-    const text = (window as any).__aiInlineSuggestion;
-    if (!text || !editor) return;
-    const pos = editor.getPosition();
-    if (pos) {
-        editor.executeEdits('ai-inline', [{ range: new (window as any).monaco.Range(pos.lineNumber, pos.column, pos.lineNumber, pos.column), text: '\n' + text }]);
-    }
-    dismissInlineSuggestion();
-}
-
-function dismissInlineSuggestion() {
-    $('ai-inline-widget').classList.add('hidden');
-    (window as any).__aiInlineSuggestion = null;
-}
-
-// ── Breadcrumb Bar ──
-
-function updateBreadcrumb(filePath?: string) {
-    const bar = $('breadcrumb-bar');
-    const pathEl = $('breadcrumb-path');
-    if (!filePath) { bar.classList.add('hidden'); return; }
-    bar.classList.remove('hidden');
-
-    const parts = filePath.replace(/\\/g, '/').split('/');
-    // Show last 3-4 parts
-    const visible = parts.slice(-4);
-    pathEl.innerHTML = visible.map((part, i) => {
-        const isLast = i === visible.length - 1;
-        return `<span class="breadcrumb-item${isLast ? ' active' : ''}">${part}</span>${!isLast ? '<span class="breadcrumb-sep">›</span>' : ''}`;
-    }).join('');
-}
-
-// ── AI Context Menu for Editor ──
-
-function addAIContextMenuItems(items: CtxItem[]): CtxItem[] {
-    if (!userSettings.aiApiKey && userSettings.aiProvider !== 'local') return items;
-
-    items.push({ label: '─', action: () => {} });
-    items.push({
-        label: '🤖 Ask AI about this code',
-        action: () => {
-            const selection = editor?.getModel()?.getValueInRange(editor.getSelection());
-            if (selection) {
-                switchToAIPanel();
-                setAIContext(selection);
-                ($('ai-input') as HTMLTextAreaElement).focus();
-            } else {
-                switchToAIPanel();
-                ($('ai-input') as HTMLTextAreaElement).focus();
-            }
-        },
-    });
-    items.push({
-        label: '⚡ Generate code here',
-        action: () => {
-            switchToAIPanel();
-            switchAIMode('generate');
-            ($('ai-gen-prompt') as HTMLTextAreaElement).focus();
-        },
-    });
-    items.push({
-        label: '📖 Explain this code',
-        action: () => {
-            const selection = editor?.getModel()?.getValueInRange(editor.getSelection());
-            if (selection) {
-                switchToAIPanel();
-                sendAIMessage('Explain this code in detail:', selection);
-            }
-        },
-    });
-    items.push({
-        label: '🔧 Fix / improve this code',
-        action: () => {
-            const selection = editor?.getModel()?.getValueInRange(editor.getSelection());
-            if (selection) {
-                switchToAIPanel();
-                sendAIMessage('Fix any bugs and suggest improvements for this code:', selection);
-            }
-        },
-    });
-    return items;
-}
-
-function switchToAIPanel() {
-    // Click the AI sidebar tab
-    const aiTab = document.querySelector('[data-panel="ai"]') as HTMLElement;
-    if (aiTab) aiTab.click();
-}
-
-function switchAIMode(mode: string) {
-    document.querySelectorAll('.ai-mode-tab').forEach(t => t.classList.toggle('active', t.getAttribute('data-ai-mode') === mode));
-    document.querySelectorAll('.ai-view').forEach(v => v.classList.remove('active'));
-    const view = document.getElementById(`ai-${mode}-view`);
-    if (view) view.classList.add('active');
-}
-
-function setAIContext(code: string) {
-    const badge = $('ai-context-badge');
-    const text = $('ai-context-text');
-    const lines = code.split('\n');
-    text.textContent = `📎 ${lines.length} line${lines.length > 1 ? 's' : ''} of code attached`;
-    badge.classList.remove('hidden');
-    (badge as any).__contextCode = code;
-}
-
-// ── AI Settings Dialog ──
-
-function openAISettings() {
-    const overlay = $('ai-settings-overlay');
-    overlay.classList.remove('hidden');
-    // Populate from current settings
-    ($('ai-provider') as HTMLSelectElement).value = userSettings.aiProvider;
-    ($('ai-api-key') as HTMLInputElement).value = userSettings.aiApiKey;
-    ($('ai-endpoint-url') as HTMLInputElement).value = userSettings.aiEndpoint;
-    ($('ai-model') as HTMLInputElement).value = userSettings.aiModel || '';
-    ($('ai-system-prompt') as HTMLTextAreaElement).value = userSettings.aiSystemPrompt;
-    ($('ai-auto-errors') as HTMLInputElement).checked = userSettings.aiAutoErrors;
-    ($('ai-inline-suggest') as HTMLInputElement).checked = userSettings.aiInlineSuggest;
-    ($('ai-file-context') as HTMLInputElement).checked = userSettings.aiFileContext;
-    toggleCustomEndpointField();
-}
-
-function toggleCustomEndpointField() {
-    const provider = ($('ai-provider') as HTMLSelectElement).value;
-    $('ai-custom-endpoint').classList.toggle('hidden', provider !== 'custom' && provider !== 'local');
-}
-
-
-function saveAISettings() {
-    userSettings.aiProvider = ($('ai-provider') as HTMLSelectElement).value as any;
-    userSettings.aiApiKey = ($('ai-api-key') as HTMLInputElement).value;
-    userSettings.aiEndpoint = ($('ai-endpoint-url') as HTMLInputElement).value;
-    userSettings.aiModel = ($('ai-model') as HTMLInputElement).value.trim();
-    userSettings.aiSystemPrompt = ($('ai-system-prompt') as HTMLTextAreaElement).value;
-    userSettings.aiAutoErrors = ($('ai-auto-errors') as HTMLInputElement).checked;
-    userSettings.aiInlineSuggest = ($('ai-inline-suggest') as HTMLInputElement).checked;
-    userSettings.aiFileContext = ($('ai-file-context') as HTMLInputElement).checked;
-    saveUserSettings();
-    $('ai-settings-overlay').classList.add('hidden');
-    updateAIStatusFromSettings();
-}
-
-function updateAIStatusFromSettings() {
-    if (userSettings.aiApiKey || userSettings.aiProvider === 'local') {
-        setAIStatus('connected', 'Ready');
-    } else {
-        setAIStatus('disconnected', 'No API key configured');
-    }
-}
-
-async function testAIConnection() {
-    const origKey = userSettings.aiApiKey;
-    const origProvider = userSettings.aiProvider;
-    const origEndpoint = userSettings.aiEndpoint;
-    const origModel = userSettings.aiModel;
-    userSettings.aiApiKey = ($('ai-api-key') as HTMLInputElement).value;
-    userSettings.aiProvider = ($('ai-provider') as HTMLSelectElement).value as any;
-    userSettings.aiEndpoint = ($('ai-endpoint-url') as HTMLInputElement).value;
-    userSettings.aiModel = ($('ai-model') as HTMLInputElement).value.trim();
-
-    const btn = $('ai-test-connection') as HTMLButtonElement;
-    btn.disabled = true;
-    btn.textContent = '⏳ Testing...';
-
-    try {
-        await aiComplete([{ role: 'user', content: 'Say "connected" and nothing else.' }]);
-        btn.textContent = '✅ Connected!';
-    } catch (err: any) {
-        btn.textContent = `❌ ${err.message.substring(0, 40)}`;
-    }
-
-    userSettings.aiApiKey = origKey;
-    userSettings.aiProvider = origProvider;
-    userSettings.aiEndpoint = origEndpoint;
-    userSettings.aiModel = origModel;
-
-    setTimeout(() => { btn.disabled = false; btn.textContent = '🔌 Test Connection'; }, 3000);
-}
-
-// ── Initialize AI System ──
-
-// ══════════════════════════════════════════════════════════════════════
-// AI HINT BAR — Selection-triggered inline actions
-// ══════════════════════════════════════════════════════════════════════
-
-let hintBarDebounce: any = null;
-let hintBarSelection: { text: string; range: any } | null = null;
-let hintResultData: { action: string; code: string; result: string } | null = null;
-
-function initAIHintBar() {
-    if (!editor) return;
-
-    // Listen for selection changes in Monaco
-    editor.onDidChangeCursorSelection((e: any) => {
-        clearTimeout(hintBarDebounce);
-        const selection = e.selection;
-        const model = editor.getModel();
-        if (!model) return;
-
-        const text = model.getValueInRange(selection).trim();
-        if (!text || text.length < 3 || selection.startLineNumber === selection.endLineNumber && selection.startColumn === selection.endColumn) {
-            hideHintBar();
-            return;
-        }
-
-        // Debounce — show after 400ms of stable selection
-        hintBarDebounce = setTimeout(() => {
-            hintBarSelection = { text, range: selection };
-            showHintBar(selection);
-        }, 400);
-    });
-
-    // Hint bar button clicks
-    $('ai-hint-bar').addEventListener('click', (e: MouseEvent) => {
-        const btn = (e.target as HTMLElement).closest('.ai-hint-btn') as HTMLElement;
-        if (!btn || !hintBarSelection) return;
-        const action = btn.getAttribute('data-action');
-        if (action) executeHintAction(action, hintBarSelection.text, hintBarSelection.range);
-    });
-
-    // Result panel buttons
-    $('ai-hint-result-close').addEventListener('click', hideHintResult);
-    $('ai-hint-reject').addEventListener('click', hideHintResult);
-    $('ai-hint-apply').addEventListener('click', applyHintResult);
-    $('ai-hint-copy').addEventListener('click', () => {
-        if (hintResultData) {
-            navigator.clipboard.writeText(hintResultData.result);
-            ($('ai-hint-copy') as HTMLElement).textContent = '✓ Copied';
-            setTimeout(() => ($('ai-hint-copy') as HTMLElement).textContent = '📋 Copy', 1500);
-        }
-    });
-
-    // Hide hint bar when editor scrolls or loses focus
-    editor.onDidScrollChange(() => { hideHintBar(); hideHintResult(); });
-    editor.onDidBlurEditorText(() => {
-        // Small delay so clicking hint bar buttons works
-        setTimeout(() => {
-            if (!document.querySelector('.ai-hint-bar:hover') && !document.querySelector('.ai-hint-result:hover')) {
-                hideHintBar();
-            }
-        }, 200);
-    });
-}
-
-function showHintBar(selection: any) {
-    if (!editor) return;
-    // Don't show if no API configured
-    if (!userSettings.aiApiKey && userSettings.aiProvider !== 'local' && userSettings.aiProvider !== 'custom') return;
-
-    const bar = $('ai-hint-bar');
-    const editorDom = $('editor-container');
-    const editorRect = editorDom.getBoundingClientRect();
-
-    // Get position of the start of the selection
-    const coords = editor.getScrolledVisiblePosition({ lineNumber: selection.startLineNumber, column: selection.startColumn });
-    if (!coords) { hideHintBar(); return; }
-
-    const x = editorRect.left + coords.left;
-    const y = editorRect.top + coords.top - 36; // 36px above selection
-
-    // Keep on screen
-    bar.classList.remove('hidden');
-    const barWidth = bar.offsetWidth || 250;
-    bar.style.left = Math.max(editorRect.left, Math.min(x, window.innerWidth - barWidth - 8)) + 'px';
-    bar.style.top = Math.max(editorRect.top, y) + 'px';
-}
-
-function hideHintBar() {
-    $('ai-hint-bar').classList.add('hidden');
-}
-
-function hideHintResult() {
-    $('ai-hint-result').classList.add('hidden');
-    hintResultData = null;
-}
-
-function showHintResult(x: number, y: number) {
-    const panel = $('ai-hint-result');
-    panel.classList.remove('hidden');
-    const pw = 520;
-    const ph = panel.offsetHeight || 200;
-    panel.style.left = Math.max(8, Math.min(x, window.innerWidth - pw - 8)) + 'px';
-    panel.style.top = Math.max(8, Math.min(y, window.innerHeight - ph - 8)) + 'px';
-}
-
-function setHintResultLoading(action: string) {
-    const titles: Record<string, string> = {
-        explain: '📖 Explaining...',
-        fix: '🔧 Auto Fixing...',
-        refactor: '⚡ Refactoring...',
-    };
-    $('ai-hint-result-title').textContent = titles[action] || '🤖 Nexia AI';
-    $('ai-hint-result-status').textContent = '';
-    $('ai-hint-result-body').innerHTML = '<div class="ai-hint-loading"><div class="ai-hint-loading-dots"><span class="ai-hint-loading-dot"></span><span class="ai-hint-loading-dot"></span><span class="ai-hint-loading-dot"></span></div><span class="ai-hint-loading-label">Thinking...</span></div>';
-    $('ai-hint-result-actions').classList.add('hidden');
-}
-
-async function executeHintAction(action: string, code: string, range: any) {
-    hideHintBar();
-
-    // Position result panel near the selection
-    const editorDom = $('editor-container');
-    const editorRect = editorDom.getBoundingClientRect();
-    const coords = editor.getScrolledVisiblePosition({ lineNumber: range.endLineNumber, column: 1 });
-    const rx = editorRect.left + (coords?.left || 100);
-    const ry = editorRect.top + (coords?.top || 100) + 24;
-
-    showHintResult(rx, ry);
-    setHintResultLoading(action);
-
-    const prompts: Record<string, string> = {
-        explain: `Explain the following code. Describe what it does, its purpose, and any notable patterns or potential issues. Be concise but thorough.
-
-\`\`\`cpp
-${code}
-\`\`\``,
-
-        fix: `You are a code repair tool. Analyze the following code for bugs, errors, and issues, then provide the FIXED version.
-
-IMPORTANT: Respond using EXACTLY this format:
-<tool>fix_code</tool>
-<search>
-(the exact original code or pattern to find)
-</search>
-<replace>
-(the corrected code to replace it with)
-</replace>
-<explanation>
-(brief explanation of what was fixed and why)
-</explanation>
-
-If there are multiple fixes needed, repeat the tool block for each one.
-If no issues are found, say "No issues found" and explain why the code is correct.
-
-\`\`\`cpp
-${code}
-\`\`\``,
-
-        refactor: `You are a code refactoring tool. Improve the following code for readability, performance, or best practices while preserving its functionality.
-
-IMPORTANT: Respond using EXACTLY this format:
-<tool>refactor_code</tool>
-<mode>replace</mode>
-<code>
-(the complete refactored code that replaces the selection)
-</code>
-<explanation>
-(brief explanation of what was changed and why)
-</explanation>
-
-\`\`\`cpp
-${code}
-\`\`\``,
-    };
-
-    try {
-        const reply = await aiComplete([{ role: 'user', content: prompts[action] }]);
-
-        const titleLabels: Record<string, string> = {
-            explain: '📖 Explanation',
-            fix: '🔧 Auto Fix',
-            refactor: '⚡ Refactored',
-        };
-        $('ai-hint-result-title').textContent = titleLabels[action] || '🤖 Nexia AI';
-
-        if (action === 'explain') {
-            // Explain — just render markdown, no apply button
-            $('ai-hint-result-body').innerHTML = renderMarkdown(reply);
-            addCopyButtonsToCodeBlocks($('ai-hint-result-body'));
-            $('ai-hint-result-actions').classList.add('hidden');
-            hintResultData = { action, code, result: reply };
-            $('ai-hint-result-status').textContent = '';
-            // Show copy only
-            $('ai-hint-result-actions').classList.remove('hidden');
-            ($('ai-hint-apply') as HTMLElement).style.display = 'none';
-            ($('ai-hint-reject') as HTMLElement).style.display = 'none';
-
-        } else if (action === 'fix') {
-            // Parse fix_code tool calls
-            const fixes = parseFixToolCalls(reply);
-            if (fixes.length > 0) {
-                renderFixResult(fixes, code);
-                hintResultData = { action, code, result: JSON.stringify(fixes) };
-            } else {
-                // No structured tool call — show as markdown
-                $('ai-hint-result-body').innerHTML = renderMarkdown(reply);
-                addCopyButtonsToCodeBlocks($('ai-hint-result-body'));
-                $('ai-hint-result-actions').classList.add('hidden');
-                hintResultData = { action, code, result: reply };
-            }
-
-        } else if (action === 'refactor') {
-            // Parse refactor_code tool call
-            const refactored = parseRefactorToolCall(reply);
-            if (refactored) {
-                renderRefactorResult(code, refactored.code, refactored.explanation);
-                hintResultData = { action, code, result: refactored.code };
-            } else {
-                $('ai-hint-result-body').innerHTML = renderMarkdown(reply);
-                addCopyButtonsToCodeBlocks($('ai-hint-result-body'));
-                $('ai-hint-result-actions').classList.add('hidden');
-                hintResultData = { action, code, result: reply };
-            }
-        }
-
-    } catch (err: any) {
-        $('ai-hint-result-title').textContent = '❌ Error';
-        $('ai-hint-result-body').innerHTML = `<p style="color:var(--red)">${err.message}</p>`;
-        $('ai-hint-result-actions').classList.add('hidden');
-    }
-}
-
-// ── Tool call parsers ──
-
-interface FixCall { search: string; replace: string; explanation: string; }
-
-function parseFixToolCalls(text: string): FixCall[] {
-    const fixes: FixCall[] = [];
-    // Match <tool>fix_code</tool> blocks
-    const toolRegex = /<tool>\s*fix_code\s*<\/tool>\s*<search>\s*([\s\S]*?)\s*<\/search>\s*<replace>\s*([\s\S]*?)\s*<\/replace>(?:\s*<explanation>\s*([\s\S]*?)\s*<\/explanation>)?/gi;
-    let match;
-    while ((match = toolRegex.exec(text)) !== null) {
-        fixes.push({
-            search: match[1].trim(),
-            replace: match[2].trim(),
-            explanation: (match[3] || '').trim(),
-        });
-    }
-    return fixes;
-}
-
-interface RefactorResult { code: string; explanation: string; mode: string; }
-
-function parseRefactorToolCall(text: string): RefactorResult | null {
-    const regex = /<tool>\s*refactor_code\s*<\/tool>\s*(?:<mode>\s*([\s\S]*?)\s*<\/mode>\s*)?<code>\s*([\s\S]*?)\s*<\/code>(?:\s*<explanation>\s*([\s\S]*?)\s*<\/explanation>)?/i;
-    const match = regex.exec(text);
-    if (!match) return null;
-    return {
-        mode: (match[1] || 'replace').trim(),
-        code: match[2].trim(),
-        explanation: (match[3] || '').trim(),
-    };
-}
-
-// ── Result renderers ──
-
-function renderFixResult(fixes: FixCall[], originalCode: string) {
-    const body = $('ai-hint-result-body');
-    let html = `<p style="margin-bottom:8px;color:var(--text-dim);font-size:11px;">${fixes.length} fix${fixes.length > 1 ? 'es' : ''} found:</p>`;
-
-    for (let i = 0; i < fixes.length; i++) {
-        const fix = fixes[i];
-        html += `<div style="margin-bottom:10px;">`;
-        if (fix.explanation) {
-            html += `<p style="font-size:11px;color:var(--text);margin:0 0 4px;"><strong>#${i + 1}:</strong> ${fix.explanation}</p>`;
-        }
-        html += `<div class="ai-hint-diff-remove"><pre>${escapeHtml(fix.search)}</pre></div>`;
-        html += `<div class="ai-hint-diff-add"><pre>${escapeHtml(fix.replace)}</pre></div>`;
-        html += `</div>`;
-    }
-
-    body.innerHTML = html;
-    $('ai-hint-result-status').textContent = `${fixes.length} change${fixes.length > 1 ? 's' : ''}`;
-
-    // Show apply/reject
-    const actions = $('ai-hint-result-actions');
-    actions.classList.remove('hidden');
-    ($('ai-hint-apply') as HTMLElement).style.display = '';
-    ($('ai-hint-reject') as HTMLElement).style.display = '';
-}
-
-function renderRefactorResult(original: string, refactored: string, explanation: string) {
-    const body = $('ai-hint-result-body');
-    let html = '';
-    if (explanation) {
-        html += `<p style="font-size:11px;color:var(--text);margin:0 0 8px;">${explanation}</p>`;
-    }
-    html += `<div class="ai-hint-diff-remove"><pre>${escapeHtml(original)}</pre></div>`;
-    html += `<div class="ai-hint-diff-add"><pre>${escapeHtml(refactored)}</pre></div>`;
-    body.innerHTML = html;
-    $('ai-hint-result-status').textContent = 'Refactored';
-
-    const actions = $('ai-hint-result-actions');
-    actions.classList.remove('hidden');
-    ($('ai-hint-apply') as HTMLElement).style.display = '';
-    ($('ai-hint-reject') as HTMLElement).style.display = '';
-}
-
-// ── Apply changes to editor ──
-
-function applyHintResult() {
-    if (!hintResultData || !editor || !hintBarSelection) return;
-    const model = editor.getModel();
-    if (!model) return;
-
-    const { action, code, result } = hintResultData;
-    const range = hintBarSelection.range;
-
-    if (action === 'fix') {
-        // Apply fix_code tool calls — search/replace within the selection
-        const fixes: FixCall[] = JSON.parse(result);
-        let currentText = model.getValueInRange(range);
-
-        for (const fix of fixes) {
-            // Try exact string match first
-            if (currentText.includes(fix.search)) {
-                currentText = currentText.replace(fix.search, fix.replace);
-            } else {
-                // Try regex match
-                try {
-                    const regex = new RegExp(fix.search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g');
-                    currentText = currentText.replace(regex, fix.replace);
-                } catch {
-                    // If regex fails, try line-by-line fuzzy match
-                    currentText = currentText.replace(fix.search.trim(), fix.replace.trim());
-                }
-            }
-        }
-
-        // Apply the edit
-        const monaco = (window as any).monaco;
-        editor.executeEdits('ai-hint-fix', [{
-            range: new monaco.Range(range.startLineNumber, range.startColumn, range.endLineNumber, range.endColumn),
-            text: currentText,
-        }]);
-
-    } else if (action === 'refactor') {
-        // Replace entire selection with refactored code
-        const monaco = (window as any).monaco;
-        editor.executeEdits('ai-hint-refactor', [{
-            range: new monaco.Range(range.startLineNumber, range.startColumn, range.endLineNumber, range.endColumn),
-            text: result,
-        }]);
-    }
-
-    hideHintResult();
-    // Mark file as modified
-    if (activeTab) {
-        const tab = openTabs.find(t => t.path === activeTab);
-        if (tab && !tab.modified) { tab.modified = true; renderTabs(); }
-    }
-}
-
-function initAI() {
-    // Mode tabs
-    document.querySelectorAll('.ai-mode-tab').forEach(tab => {
-        tab.addEventListener('click', () => switchAIMode(tab.getAttribute('data-ai-mode') || 'chat'));
-    });
-
-    // Chat input
-    const input = $('ai-input') as HTMLTextAreaElement;
-    input.addEventListener('keydown', (e: KeyboardEvent) => {
-        if (e.key === 'Enter' && !e.shiftKey) {
-            e.preventDefault();
-            const contextBadge = $('ai-context-badge');
-            const contextCode = (contextBadge as any).__contextCode || undefined;
-            sendAIMessage(input.value, contextCode);
-            input.value = '';
-            input.style.height = 'auto';
-            // Clear context
-            contextBadge.classList.add('hidden');
-            (contextBadge as any).__contextCode = null;
-        }
-    });
-    // Auto-resize textarea
-    input.addEventListener('input', () => {
-        input.style.height = 'auto';
-        input.style.height = Math.min(input.scrollHeight, 120) + 'px';
-    });
-
-    // Send button
-    $('ai-send').addEventListener('click', () => {
-        if (aiStreaming && aiAbortStream) {
-            // Stop streaming
-            aiAbortStream();
-            aiAbortStream = null;
-            aiStreaming = false;
-            ($('ai-send') as HTMLButtonElement).disabled = false;
-    $('ai-send').textContent = '↑';
-            $('ai-send').textContent = '↑';
-            setAIStatus('connected', 'Stopped');
-            // Remove streaming badge from current message
-            const streamingMsg = document.querySelector('.ai-msg-streaming');
-            if (streamingMsg) {
-                streamingMsg.classList.remove('ai-msg-streaming');
-                const badge = streamingMsg.querySelector('.ai-msg-streaming-badge');
-                if (badge) badge.remove();
-            }
-            return;
-        }
-        const contextCode = ($('ai-context-badge') as any).__contextCode || undefined;
-        sendAIMessage(input.value, contextCode);
-        input.value = '';
-        input.style.height = 'auto';
-        $('ai-context-badge').classList.add('hidden');
-    });
-
-    // Clear button
-    $('ai-clear').addEventListener('click', clearAIChat);
-
-    // Quick action buttons
-    document.addEventListener('click', (e) => {
-        const btn = (e.target as HTMLElement).closest('.ai-quick-btn');
-        if (btn) {
-            const prompt = btn.getAttribute('data-prompt');
-            if (prompt) sendAIMessage(prompt);
-        }
-    });
-
-    // Settings
-    $('ai-settings-btn').addEventListener('click', openAISettings);
-    $('ai-settings-save').addEventListener('click', saveAISettings);
-    $('ai-settings-cancel').addEventListener('click', () => $('ai-settings-overlay').classList.add('hidden'));
-    $('ai-provider').addEventListener('change', () => { toggleCustomEndpointField(); });
-    $('ai-test-connection').addEventListener('click', testAIConnection);
-    $('ai-key-toggle').addEventListener('click', () => {
-        const inp = $('ai-api-key') as HTMLInputElement;
-        inp.type = inp.type === 'password' ? 'text' : 'password';
-        ($('ai-key-toggle') as HTMLElement).textContent = inp.type === 'password' ? 'Show' : 'Hide';
-    });
-
-    // Context clear
-    $('ai-context-clear').addEventListener('click', () => {
-        $('ai-context-badge').classList.add('hidden');
-        ($('ai-context-badge') as any).__contextCode = null;
-    });
-
-    // Generate mode
-    $('ai-gen-submit').addEventListener('click', generateAICode);
-    $('ai-gen-copy').addEventListener('click', () => {
-        navigator.clipboard.writeText($('ai-gen-code-text').textContent || '');
-        ($('ai-gen-copy') as HTMLElement).textContent = '✓ Copied';
-        setTimeout(() => ($('ai-gen-copy') as HTMLElement).textContent = '📋 Copy', 1500);
-    });
-    $('ai-gen-insert').addEventListener('click', () => {
-        const code = $('ai-gen-code-text').textContent || '';
-        if (editor && code) {
-            const pos = editor.getPosition();
-            if (pos) {
-                editor.executeEdits('ai-gen', [{ range: new (window as any).monaco.Range(pos.lineNumber, pos.column, pos.lineNumber, pos.column), text: code }]);
-            }
-        }
-    });
-    $('ai-gen-newfile').addEventListener('click', () => {
-        const code = $('ai-gen-code-text').textContent || '';
-        // Trigger new file dialog, user can paste
-        navigator.clipboard.writeText(code);
-        appendOutput('Generated code copied to clipboard. Create a new file and paste.\n');
-    });
-
-    // Inline suggestion handlers
-    $('ai-inline-accept').addEventListener('click', acceptInlineSuggestion);
-    $('ai-inline-dismiss').addEventListener('click', dismissInlineSuggestion);
-
-    // Keyboard shortcut: Ctrl+Shift+A to focus AI
-    document.addEventListener('keydown', (e: KeyboardEvent) => {
-        if (e.ctrlKey && e.shiftKey && e.key === 'A') {
-            e.preventDefault();
-            switchToAIPanel();
-            ($('ai-input') as HTMLTextAreaElement).focus();
-        }
-        // Esc to dismiss inline suggestion
-        if (e.key === 'Escape') dismissInlineSuggestion();
-        // Tab to accept inline suggestion
-        if (e.key === 'Tab' && (window as any).__aiInlineSuggestion) {
-            e.preventDefault();
-            acceptInlineSuggestion();
-        }
-    });
-
-    updateAIStatusFromSettings();
-
-    // Initialize hint bar after editor is ready
-    monacoReady.then(() => initAIHintBar());
-}
 
 async function init() {
+    // Replace emoji characters with SVG icons
+    const { initIcons, patchIcons } = require('./icons');
+    initIcons();
+    // Patch dynamically-added content
+    const observer = new MutationObserver((mutations) => {
+        for (const m of mutations) {
+            for (const node of Array.from(m.addedNodes)) {
+                if (node.nodeType === Node.ELEMENT_NODE) patchIcons(node as HTMLElement);
+                else if (node.nodeType === Node.TEXT_NODE && node.parentElement) patchIcons(node.parentElement);
+            }
+        }
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+
     loadUserSettings();
     loadProfile();
     loadFlashcards();
+
+    // Wire shared app context for extracted modules
+    appCtx.userSettings = userSettings;
+    appCtx.userProfile = userProfile;
+    appCtx.ipc = ipcRenderer;
+    appFn.appendOutput = appendOutput;
+    appFn.clearOutput = clearOutput;
+    appFn.showBottomPanel = showBottomPanel;
+    appFn.renderTabs = renderTabs;
+    appFn.saveUserSettings = saveUserSettings;
+    appFn.saveProfile = saveProfile;
+    appFn.refreshFileTree = refreshFileTree;
+    appFn.switchToTab = switchToTab;
+    appFn.renderMarkdown = renderMarkdown;
+
+    // Wire mutable state via getters so extracted modules always see live values
+    Object.defineProperty(appCtx, 'activeTab', { get: () => activeTab, configurable: true });
+    Object.defineProperty(appCtx, 'openTabs', { get: () => openTabs, configurable: true });
+    Object.defineProperty(appCtx, 'userSettings', { get: () => userSettings, configurable: true });
+    Object.defineProperty(appCtx, 'userProfile', { get: () => userProfile, configurable: true });
+    Object.defineProperty(appCtx, 'currentProject', { get: () => currentProject, configurable: true });
+
+    // Phase 2: Initialize adaptive learning system
+    learningProfile.load();           // Load saved mastery progress from disk
+    // Cinematic tutor is loaded on-demand when the user opens it
+    learningProfile.startSession();   // Start tracking learning time
+
+    // Proactive tutor: welcome back after long absence
+    if (userSettings.aiApiKey || userSettings.aiProvider === 'local') {
+        const allConcepts = learningProfile.conceptProgress;
+        let lastTime = 0;
+        let lastTopic = 'C++ basics';
+        for (const [id, cp] of allConcepts) {
+            for (const h of cp.history || []) {
+                if (h.timestamp > lastTime) { lastTime = h.timestamp; lastTopic = cp.conceptName || id; }
+            }
+        }
+        if (lastTime > 0) {
+            const hoursSince = (Date.now() - lastTime) / (1000 * 60 * 60);
+            if (hoursSince > 24) {
+                setTimeout(() => tutorOnSessionReturn(lastTopic, Math.round(hoursSince / 24)), 3000);
+            }
+        }
+    }
     applyThemeColors();
     applyFancyMode();
+    applyLayout();
+    applyCornerRadius();
+    applyCompactMode();
+    // Apply saved color mode
+    if (userSettings.colorMode) applyColorMode(userSettings.colorMode);
+    // Apply saved UI layout (sidebar order, panel sizes, welcome screen)
+    try { applyUILayout(loadUILayoutConfig()); } catch {}
     initMonaco();
+    _projectPropsMod.initProjectProperties({ $, $$: (s: string) => document.querySelectorAll(s), appendOutput, ipcRenderer, IPC, getCurrentProject: () => currentProject, setCurrentProject: (p: any) => { currentProject = p; } });
+    _fileTreeMod.initFileTree({ $, appendOutput, ipcRenderer, IPC, shell, nodePath, nodeFs, openFile, showContextMenu, getCurrentProject: () => currentProject, closeProject: closeCurrentProject });
+    _devkitPanel.initDevkit({ $, appendOutput, escapeHtml: escapeHtml, ipcRenderer, IPC, nodeFs, nodePath, nodeOs });
     initDevkitPanel();
+    _emulatorPanel.initEmulator({ $, appendOutput, escapeHtml: escapeHtml, ipcRenderer, IPC, nodeOs });
     initEmulatorPanel();
     initTabContextMenu();
     setBuildStatus('ready');
     renderLearnPanel();
     renderTipsPanel();
     renderStudyPanel();
-    renderCommunityPanel();
+    renderGitPanel();
+    initVisualizerPanel();
     initAI();
+
+    // ── Auth initialization ──
+    // Silently load stored token and validate
+    const authUser = await authService.init();
+    // Show username in titlebar
+    updateTitlebarUser();
+    // Pull cloud settings if logged in
+    if (authUser) {
+        pullCloudSettings();
+    }
+
+    // Render community panel AFTER auth is initialized so it knows login state
+    try {
+        communityPanel.initCommunity({
+            $, appendOutput, escapeHtml, ipcRenderer, shell, IPC,
+            authService, authUI, renderGitPanel, saveUserSettings,
+            nodeFs, nodePath, nodeOs,
+        });
+        renderCommunityPanel();
+    } catch (err: any) {
+        console.error('[Community] Init failed:', err);
+        appendOutput('Community panel failed to load: ' + err.message + '\n');
+    }
+
+    // Listen for future auth changes (login/logout during this session)
+    authService.onAuthStateChange((user: any) => {
+        updateTitlebarUser();
+        // Pull cloud settings when user logs in
+        if (user) pullCloudSettings();
+        // Re-render community panel on login/logout
+        renderCommunityPanel();
+    });
+
+    // Listen for connection/pulse state changes
+    authService.onConnectionStateChange((state: any) => {
+        updateConnectionStatus(state);
+    });
+
+    // ── Internet Connectivity Monitor ──
+    checkInternetConnectivity();
+    window.addEventListener('online', () => { hideNoInternetToast(); });
+    window.addEventListener('offline', () => { showNoInternetToast(); });
+
     const state = await ipcRenderer.invoke(IPC.APP_READY);
     defaultProjectsDir = state.projectsDir || '';
     await checkSetup(state);
@@ -6509,6 +4759,8 @@ async function init() {
         // Start idle tip timer for returning users
         resetIdleTipTimer();
     }
+
+    // Auto-reopen removed — IDE shows welcome screen until user explicitly opens a project
 }
 
 $$('.overlay').forEach(o => {

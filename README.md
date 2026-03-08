@@ -22,43 +22,61 @@
 
 ## Features
 
-**Code Editor** — Full Monaco-based editor with Xbox 360 C++ syntax highlighting, IntelliSense, tab management, and a Visual Studio–style Solution Explorer for navigating your project.
+**Code Editor** — Full Monaco-based editor with Xbox 360 C++ syntax highlighting, IntelliSense for XDK APIs, tab management, inline AI hints, and a Visual Studio–style Solution Explorer.
 
-**One-Click Build System** — Compile, link, and package `.xex` executables directly from the IDE. Supports Debug, Release, and Profile configurations with real-time build output.
+**One-Click Build System** — Compile, link, and package `.xex` executables and dynamic libraries directly from the IDE. Supports Debug, Release, and Profile configurations with real-time MSBuild-style output. Incremental and parallel compilation, response files for large projects, and full Project Properties matching VS2010 Xbox 360 property pages.
+
+**Project Templates** — Title (.xex), Dynamic Library (.xex), Static Library (.lib), spinning cube demo, XUI application, and XBLA title scaffold with networking and achievements.
 
 **SDK Tools** — Integrated access to shader compiler (fxc), audio encoder (xma2encode), XUI compiler, binary inspector, PIX profiler launcher, and more — all without leaving the IDE.
 
 **Devkit Management** — Connect to a development kit over the network. Deploy builds, reboot the console, capture screenshots, browse the file system, and monitor CPU/memory usage.
 
-**Emulator Integration (Nexia 360)** — Launch and debug your builds in an emulator. Set breakpoints, inspect registers, step through code, read/write memory, and view backtraces.
+**Emulator Integration (Nexia 360)** — Launch and debug your builds in an emulator. Set breakpoints, inspect registers, step through code, read/write memory, and view backtraces. Requires Windows 10+.
 
-**Project Templates** — Start from an empty project, a spinning textured cube demo, a XUI application, or an XBLA title scaffold complete with networking and achievements setup.
+**AI Tutor** — Multi-provider AI assistant (Anthropic, OpenAI, Ollama, custom endpoints) with streaming responses, code generation, inline explain/fix/refactor actions, and proactive tutoring that adapts to your skill level.
 
-**Extensions** — Install community tools, templates, snippet packs, themes, and plugins from `.zip` files or folders. Create and share your own.
+**Cinematic Learning System** — 17 interactive lessons across 8 modules covering C++ fundamentals through Xbox 360 specifics (Xenon architecture, Direct3D 9, XInput). Typing animations, token explanations, connection diagrams, adaptive mastery tracking with spaced repetition, quizzes, flashcards, study notes, and achievements.
+
+**Genesis Lab** — Self-evolving AI lesson engine that generates, critiques, and refines lessons through iterative evolution. Persistent across sessions with HTML export.
+
+**Code Visualizer** — Flow charts, class diagrams, and memory layouts rendered on Canvas 2D. AI responses can trigger visualizations automatically.
+
+**XEX Inspector** — Parse and display Xbox 360 executable headers, base address, entry point, imports, and exports.
+
+**Git Integration** — Initialize repos, stage, commit, diff, log, branch, merge, and push/pull to GitHub with token authentication.
 
 **Discord Community** — Built-in Discord feed to browse threads, post questions, and share downloads without leaving the IDE.
 
-**Learning System** — Guided onboarding, interactive tutorials, quizzes, flashcards, study notes, achievements, and a code-along helper to learn Xbox 360 development as you go.
+**Extensions** — Install community tools, templates, snippet packs, themes, and plugins from `.zip` files or folders.
 
-**Git Integration** — Initialize repos, stage changes, commit, and view status from the sidebar.
+**SVG Icon System** — All UI icons are hand-crafted SVGs that render consistently on Windows 7 through 11 without depending on system emoji fonts.
 
-**Find in Files** — Search across your entire project with `Ctrl+Shift+F`.
+**Find in Files** — Project-wide search and replace with regex support.
 
-**Project Export / Import** — Package your project as a `.zip` archive or import one to get started quickly.
+**Project Export / Import** — Package your project as a `.zip` archive or import one.
 
 ## Getting Started
 
 ### Requirements
 
-- **Windows 10 or 11**
-- **Microsoft Xbox 360 SDK (XDK)** installed
-- An Xbox 360 development kit *(optional — the emulator works without one)*
+- **Windows 7, 8, 8.1, 10, or 11**
+- **Microsoft Xbox 360 SDK (XDK)** — the installer can extract it automatically, or point to an existing installation
+- An Xbox 360 development kit *(optional — the emulator works without one, Windows 10+ only)*
+
+> **⚠️ Important:** You need the **XBOX360 SDK 21256.3.exe** file downloaded, but **do NOT install it**. The Nexia IDE installer extracts the SDK directly from the installer EXE — no registry entries, no Visual Studio dependencies, no system modifications. Just download the file and let Nexia handle the rest. Installing the SDK the traditional way requires Visual Studio 2010 and modifies system state that Nexia doesn't need.
+
+<p align="center">
+  <img src="assets/Win7.png" alt="Nexia IDE running on Windows 7" width="900">
+  <br>
+  <em>Nexia IDE running on Windows 7</em>
+</p>
 
 ### Install
 
-Download the latest release from the [Releases](../../releases) page. Choose between the installer (`.exe`) or the portable build.
+Download `NexiaSetup.exe` from the [Releases](../../releases) page. The installer bundles the VC++ 2010 runtime and can extract the Xbox 360 SDK automatically.
 
-On first launch, the setup wizard will detect your SDK installation and walk you through configuration.
+On first launch, the setup wizard detects your SDK and walks you through configuration, account creation, and a guided UI tour.
 
 ## Building from Source
 
@@ -73,50 +91,111 @@ npm start
 ### Distribution Builds
 
 ```bash
-# Portable directory build
-npm run dist
+# Build the installer (compiles TS, packages Electron, builds native installer, packs payload)
+cd scripts
+build-installer.bat
 
-# NSIS installer
-npm run dist:installer
+# Fast build (no compression, for testing)
+build-installer.bat --fast
+
+# Full rebuild (clears cache)
+build-installer.bat --full
 ```
 
-Output goes to the `dist/` folder.
+Output goes to `dist/NexiaSetup.exe`. Extra files for the installer payload (e.g. `vcredist_x86.exe`) go in the `PackedFiles/` directory.
 
 ## Architecture
 
 ```
-├── main.ts              # Electron main process — window, IPC handlers
-├── app.ts               # Renderer — UI logic, Monaco, all panels
-├── index.html           # Main UI shell
-├── main.css             # Dark theme (Xbox green)
-├── types.ts             # Shared TypeScript interfaces & IPC channels
-├── toolchain.ts         # SDK detection & tool path resolution
-├── buildSystem.ts       # Compiler, linker, XEX packaging pipeline
-├── projectManager.ts    # Project templates, create/open/save
-├── devkit.ts            # Development kit connection & management
-├── emulator.ts          # Emulator launch, debug, breakpoints
-├── sdkTools.ts          # Shader, audio, XUI, binary tool wrappers
-├── extensions.ts        # Extension install/uninstall/enable
-├── discord.ts           # Discord feed integration
-├── learning.ts          # Tutorials, achievements, code-along
-└── quizzes.ts           # Quiz & flashcard content
+src/
+├── main/
+│   ├── main.ts              # Electron main process — window, IPC handlers
+│   ├── toolchain.ts         # SDK detection & tool path resolution
+│   ├── buildSystem.ts       # Compiler, linker, XEX packaging pipeline
+│   ├── projectManager.ts    # Project templates, create/open/save
+│   ├── devkit.ts            # Development kit connection & management
+│   ├── emulator.ts          # Emulator launch, debug, breakpoints
+│   ├── sdkTools.ts          # Shader, audio, XUI, binary tool wrappers
+│   ├── extensions.ts        # Extension install/uninstall/enable
+│   └── discord.ts           # Discord feed integration
+├── renderer/
+│   ├── app.ts               # Main renderer — UI logic, Monaco, tour, tips
+│   ├── appContext.ts         # Shared state bridge for extracted modules
+│   ├── index.html           # Main UI shell
+│   ├── main.css             # Dark theme (Xbox teal)
+│   ├── icons.ts             # SVG icon system (emoji replacement)
+│   ├── git.ts               # Git & GitHub integration
+│   ├── ai/
+│   │   └── aiService.ts     # Multi-provider AI with streaming
+│   ├── auth/
+│   │   ├── authService.ts   # Account management & cloud sync
+│   │   └── authUI.ts        # Login/register UI
+│   ├── admin/
+│   │   └── adminPanel.ts    # Server administration
+│   ├── editor/
+│   │   ├── projectExport.ts # Project zip/unzip
+│   │   ├── searchPanel.ts   # Find in Files
+│   │   └── xexInspector.ts  # XEX header parser
+│   ├── learning/
+│   │   ├── learning.ts          # Tips, curriculum, achievements
+│   │   ├── learningProfile.ts   # Adaptive mastery tracking
+│   │   ├── lessonSystem.ts      # Lesson content & progression
+│   │   ├── lessonLoader.ts      # Import/export lesson packs
+│   │   ├── cinematicEngine.ts   # Typing animation renderer
+│   │   ├── cinematicConfig.ts   # Engine configuration
+│   │   ├── cinematicStyles.ts   # Lesson visual styles
+│   │   ├── cinematicVisualizers.ts # Interactive diagrams
+│   │   ├── cinematicLessonData.ts  # InitD3D lesson content
+│   │   ├── genesisEngine.ts     # AI lesson generator
+│   │   └── quizzes.ts           # Quiz & flashcard content
+│   ├── panels/
+│   │   ├── fileTree.ts          # Solution Explorer
+│   │   ├── projectProperties.ts # VS2010-style property pages
+│   │   ├── devkitPanel.ts       # Devkit sidebar
+│   │   ├── emulatorPanel.ts     # Emulator sidebar
+│   │   ├── communityPanel.ts    # Discord integration
+│   │   └── studyPanel.ts        # Flashcards & study notes
+│   ├── ui/
+│   │   └── contextMenu.ts      # Custom context menus
+│   └── visualizer/
+│       └── codeVisualizer.ts    # Flow/class/memory diagrams
+├── shared/
+│   └── types.ts             # Shared interfaces & IPC channels
+installer/
+├── installer.c              # Native Win32 installer UI
+├── installer.h              # Installer constants & structures
+├── install_pack.c           # Payload packer (compiles to packer.exe)
+└── nxcompress.h             # Compression utilities
+scripts/
+├── build-installer.bat      # One-click installer build
+├── build-portable.js        # electron-builder configuration
+├── copy-assets.js           # Static asset copier
+└── check-hash.js            # Incremental build cache
 ```
 
-The app is built with **Electron 28**, **TypeScript 5**, and **Monaco Editor**. The main process handles all filesystem, SDK, and network operations; the renderer is a single-page UI that communicates over IPC.
+Built with **Electron 22** (for Windows 7 support), **TypeScript 5**, and **Monaco Editor**. The main process handles all filesystem, SDK, and network operations; the renderer is a single-page UI communicating over IPC. The native installer is pure C/Win32 compiled with MinGW.
 
 ## Keyboard Shortcuts
 
 | Shortcut | Action |
 |---|---|
-| `F5` | Build |
+| `F7` | Build |
 | `F6` | Run in emulator |
+| `F5` | Deploy to devkit |
 | `Ctrl+S` | Save |
+| `Ctrl+Shift+S` | Save All |
 | `Ctrl+Shift+B` | Rebuild |
+| `Ctrl+B` | Build |
 | `Ctrl+N` | New Project |
+| `Ctrl+Alt+N` | New File |
 | `Ctrl+O` | Open Project |
 | `Ctrl+W` | Close Tab |
 | `Ctrl+G` | Go to Line |
 | `Ctrl+Shift+F` | Find in Files |
+| `Ctrl+\` | Toggle Sidebar |
+| `` Ctrl+` `` | Toggle Output Panel |
+| `Ctrl+=` / `Ctrl+-` | Zoom In / Out |
+| `Ctrl+0` | Reset Zoom |
 | `Escape` | Close Dialogs |
 
 ## License
