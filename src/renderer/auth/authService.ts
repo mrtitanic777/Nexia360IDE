@@ -814,3 +814,16 @@ export async function saveCloudSettings(settings: CloudSettings): Promise<boolea
     });
     return result.success === true;
 }
+
+/**
+ * Fetch Discord bot configuration from the Nexia server.
+ * Only available to authenticated users — the bot token never ships in the client.
+ */
+export async function fetchDiscordConfig(): Promise<{ botToken: string; channelId: string; clientId: string; clientSecret: string } | null> {
+    if (!_token) return null;
+    try {
+        const result = await apiFetch('/api/auth/discord-config');
+        if (result && result.botToken) return result;
+    } catch {}
+    return null;
+}

@@ -292,6 +292,20 @@ async function pullCloudSettings() {
         applyThemeColors();
         appendOutput('Cloud settings synced.\n');
     } catch {}
+
+    // Fetch Discord bot config from Nexia server (token stays server-side, delivered to authenticated users)
+    try {
+        const discordConfig = await authService.fetchDiscordConfig();
+        if (discordConfig && discordConfig.botToken) {
+            await ipcRenderer.invoke(IPC.DISCORD_CONFIGURE, {
+                botToken: discordConfig.botToken,
+                channelId: discordConfig.channelId || '1459211832437903380',
+                clientId: discordConfig.clientId || '1471724753730408622',
+                clientSecret: discordConfig.clientSecret || '',
+                enabled: true,
+            });
+        }
+    } catch {}
 }
 
 // ── Session State (open tabs, active file, last project) ──
@@ -1468,14 +1482,6 @@ ipcRenderer.on(IPC.BUILD_COMPLETE, (_e: any, result: any) => {
     }
     // Learning system hook
     onBuildComplete(result);
-    // AI error analysis hook
-    if (errCount > 0) {
-        analyzeAIBuildErrors(result.errors || [], result.warnings || []);
-    } else {
-        // Clear AI errors view
-        $('ai-errors-content').classList.add('hidden');
-        $('ai-errors-empty').classList.remove('hidden');
-    }
 });
 
 async function jumpToError(err: any) {
@@ -1569,6 +1575,9 @@ async function showNewProjectDialog() {
         container.appendChild(card);
     }
     $('new-project-overlay').classList.remove('hidden');
+    // Blur Monaco editor so it doesn't capture keystrokes, then focus the name input
+    if (editor) editor.getContainerDomNode()?.querySelector('textarea')?.blur();
+    setTimeout(() => ($('np-name') as HTMLInputElement).focus(), 100);
 }
 
 $('np-cancel').addEventListener('click', () => $('new-project-overlay').classList.add('hidden'));
@@ -1607,6 +1616,7 @@ function showNewFileDialog() {
     if (!currentProject) { appendOutput('Open a project first.\n'); return; }
     ($('nf-name') as HTMLInputElement).value = '';
     $('new-file-overlay').classList.remove('hidden');
+    if (editor) editor.getContainerDomNode()?.querySelector('textarea')?.blur();
     setTimeout(() => ($('nf-name') as HTMLInputElement).focus(), 100);
 }
 
@@ -3114,8 +3124,6 @@ function saveSettingsFromUI() {
     if (modelInput) userSettings.aiModel = modelInput.value.trim();
     const sysPrompt = get('sp-ai-system') as HTMLTextAreaElement;
     if (sysPrompt) userSettings.aiSystemPrompt = sysPrompt.value;
-    const autoErrors = get('sp-ai-auto-errors') as HTMLInputElement;
-    if (autoErrors) userSettings.aiAutoErrors = autoErrors.checked;
     const inlineSuggest = get('sp-ai-inline') as HTMLInputElement;
     if (inlineSuggest) userSettings.aiInlineSuggest = inlineSuggest.checked;
     const fileCtx = get('sp-ai-filectx') as HTMLInputElement;
@@ -3294,7 +3302,6 @@ function renderSettingsSection(container: HTMLElement, section: string) {
                 ${sectionTitle('System Context')}
                 <textarea id="sp-ai-system" rows="3" placeholder="Custom instructions (optional)" style="width:100%;padding:6px 10px;background:var(--bg-input);border:1px solid var(--border);color:var(--text);border-radius:var(--radius-sm);font-size:13px;resize:vertical;margin-bottom:12px;box-sizing:border-box;font-family:var(--font);">${escapeHtml(s.aiSystemPrompt || '')}</textarea>
                 ${sectionTitle('Behavior')}
-                ${row('Auto-analyze build errors', toggle('sp-ai-auto-errors', s.aiAutoErrors !== false))}
                 ${row('Inline code suggestions', toggle('sp-ai-inline', s.aiInlineSuggest || false))}
                 ${row('Include open file as context', toggle('sp-ai-filectx', s.aiFileContext !== false))}
                 <div style="margin-top:12px;">
@@ -4500,7 +4507,7 @@ function renderRecentProjects(recent: string[]) {
 // NEXIA AI — Extracted to ai/aiService.ts
 // ══════════════════════════════════════════════════════════════════════
 const aiService = require('./ai/aiService');
-const { aiComplete, sendAIMessage, analyzeAIBuildErrors, switchToAIPanel,
+const { aiComplete, sendAIMessage, switchToAIPanel,
         switchAIMode, setAIContext, triggerInlineSuggestion, updateBreadcrumb,
         initAI, initAIHintBar, addAIContextMenuItems, openAISettings,
         clearAIChat, renderMarkdown,
