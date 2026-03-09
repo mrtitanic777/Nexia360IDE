@@ -1,0 +1,17 @@
+#include <winuser.h>
+
+// Application icon
+1 ICON "resources\\icon.ico"
+
+// UAC manifest — request admin elevation
+// NOTE: The path must be relative to where rc.exe is invoked.
+//       If the .manifest lives alongside the .rc, use just the filename.
+//       Using a wrong relative path silently omits the manifest from the EXE,
+//       which means Windows will NOT show a UAC elevation prompt.
+#ifndef CREATEPROCESS_MANIFEST_RESOURCE_ID
+#define CREATEPROCESS_MANIFEST_RESOURCE_ID 1
+#endif
+#ifndef RT_MANIFEST
+#define RT_MANIFEST 24
+#endif
+CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "installer.manifest"

@@ -670,11 +670,13 @@ void NxIns_DrawPageComponents(HDC hdc, RECT *content)
     sDrawCheckbox(hdc, x, y, (g_ins.components & NXI_COMP_FILEASSOC) != 0,
                   L"File Associations (.vcxproj, .c, .cpp, .h)");
 
-    /* SDK extraction option */
-    if (g_ins.sdkInstallerFound) {
+    /* SDK extraction option — only show if the SDK installer was found
+     * AND the SDK is NOT already installed on the system.  If the system
+     * SDK is present the IDE will detect it automatically. */
+    if (g_ins.sdkInstallerFound && !g_ins.systemSdkFound) {
         y += checkSpacing;
         sDrawCheckbox(hdc, x, y, (g_ins.components & NXI_COMP_SDK_EXTRACT) != 0,
-                      L"Extract Xbox 360 SDK (found on system)");
+                      L"Extract Xbox 360 SDK (from bundled installer)");
 
         y += 20;
         SelectObject(hdc, g_ins.hFontSmall);
@@ -685,8 +687,8 @@ void NxIns_DrawPageComponents(HDC hdc, RECT *content)
         DrawTextW(hdc, sdkNote, -1, &sdkRc, DT_LEFT | DT_WORDBREAK | DT_PATH_ELLIPSIS);
     }
 
-    /* Note at bottom of content area */
-    y += g_ins.sdkInstallerFound ? 44 : 36;
+    /* ── System detection results ── */
+    y += (g_ins.sdkInstallerFound && !g_ins.systemSdkFound) ? 44 : 36;
     HPEN hp = CreatePen(PS_SOLID, 1, NXI_COL_BORDER);
     HPEN op = (HPEN)SelectObject(hdc, hp);
     MoveToEx(hdc, x, y, NULL);
@@ -697,13 +699,48 @@ void NxIns_DrawPageComponents(HDC hdc, RECT *content)
     y += 10;
     SelectObject(hdc, g_ins.hFontSmall);
     SetTextColor(hdc, NXI_COL_FG_SECONDARY);
-    RECT noteRc = { x, y, x + w, y + 36 };
-    DrawTextW(hdc,
-        g_ins.sdkInstallerFound ?
-            L"The SDK installer will NOT be executed. Nexia reads the raw binary and extracts "
-            L"archives using built-in Windows APIs. No UAC, no registry changes." :
-            L"All components are recommended for the best development experience.",
-        -1, &noteRc, DT_LEFT | DT_WORDBREAK);
+    RECT detLabel = { x, y, x + w, y + 16 };
+    DrawTextW(hdc, L"System Detection:", -1, &detLabel, DT_LEFT | DT_SINGLELINE);
+    y += 20;
+
+    /* Xbox 360 SDK */
+    if (g_ins.systemSdkFound) {
+        SetTextColor(hdc, NXI_COL_SUCCESS);
+        RECT r = { x + 8, y, x + w, y + 16 };
+        DrawTextW(hdc, L"\x2713  Xbox 360 SDK installed", -1, &r, DT_LEFT | DT_SINGLELINE);
+        y += 16;
+        SetTextColor(hdc, RGB(100, 100, 105));
+        RECT p = { x + 22, y, x + w, y + 14 };
+        DrawTextW(hdc, g_ins.systemSdkPath, -1, &p, DT_LEFT | DT_SINGLELINE | DT_PATH_ELLIPSIS);
+    } else {
+        SetTextColor(hdc, NXI_COL_FG_MUTED);
+        RECT r = { x + 8, y, x + w, y + 16 };
+        DrawTextW(hdc, L"\x2013  Xbox 360 SDK not found (will extract from installer)", -1, &r, DT_LEFT | DT_SINGLELINE);
+    }
+    y += 20;
+
+    /* Visual Studio 2010 */
+    if (g_ins.vs2010Found) {
+        SetTextColor(hdc, NXI_COL_SUCCESS);
+        RECT r = { x + 8, y, x + w, y + 16 };
+        DrawTextW(hdc, L"\x2713  Visual Studio 2010 detected", -1, &r, DT_LEFT | DT_SINGLELINE);
+    } else {
+        SetTextColor(hdc, NXI_COL_FG_MUTED);
+        RECT r = { x + 8, y, x + w, y + 16 };
+        DrawTextW(hdc, L"\x2013  Visual Studio 2010 not found (not required)", -1, &r, DT_LEFT | DT_SINGLELINE);
+    }
+    y += 20;
+
+    /* VC++ 2010 Runtime */
+    if (g_ins.vcRuntimeFound) {
+        SetTextColor(hdc, NXI_COL_SUCCESS);
+        RECT r = { x + 8, y, x + w, y + 16 };
+        DrawTextW(hdc, L"\x2713  VC++ 2010 runtime present (skipping install)", -1, &r, DT_LEFT | DT_SINGLELINE);
+    } else {
+        SetTextColor(hdc, NXI_COL_FG_MUTED);
+        RECT r = { x + 8, y, x + w, y + 16 };
+        DrawTextW(hdc, L"\x2013  VC++ 2010 runtime not found (will install)", -1, &r, DT_LEFT | DT_SINGLELINE);
+    }
 
     SelectObject(hdc, oldFont);
 }
@@ -807,7 +844,12 @@ void NxIns_DrawPageComplete(HDC hdc, RECT *content)
     if (g_ins.installSuccess) {
         RECT detRc = { x, y, x + w, y + 100 };
         WCHAR detBuf[1024];
-        if (g_ins.sdkInstallerFound && (g_ins.components & NXI_COMP_SDK_EXTRACT)) {
+        if (g_ins.systemSdkFound) {
+            wsprintfW(detBuf,
+                L"Nexia IDE has been installed to:\r\n%s\r\n\r\n"
+                L"%d files installed. Using system Xbox 360 SDK.",
+                g_ins.installDir, g_ins.filesExtracted);
+        } else if (g_ins.sdkInstallerFound && (g_ins.components & NXI_COMP_SDK_EXTRACT)) {
             wsprintfW(detBuf,
                 L"Nexia IDE has been installed to:\r\n%s\r\n\r\n"
                 L"%d files installed. Xbox 360 SDK extracted.",
@@ -1252,6 +1294,135 @@ BOOL NxIns_WriteUninstaller(void)
     wsprintfW(uninstDst, L"%s\\%s", g_ins.installDir, NXI_UNINSTALLER_EXE);
 
     return CopyFileW(g_ins.selfPath, uninstDst, FALSE);
+}
+
+
+/* ═══════════════════════════════════════════════════════════════
+ *  Pre-Flight System Detection
+ *
+ *  Checks if the Xbox 360 SDK is already installed on the system
+ *  and whether VS2010 / VC++ runtime is already present.
+ *  Results are displayed on the Components page so the user knows
+ *  what they already have and what needs to be installed.
+ * ═══════════════════════════════════════════════════════════════ */
+
+static BOOL sIsDirectoryW(const WCHAR *path)
+{
+    DWORD attr = GetFileAttributesW(path);
+    return (attr != INVALID_FILE_ATTRIBUTES) && (attr & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+static void NxIns_PreflightCheck(void)
+{
+    if (g_ins.preflightDone) return;
+    g_ins.preflightDone = TRUE;
+
+    /* ── Check for existing Xbox 360 SDK installation ── */
+    g_ins.systemSdkFound = FALSE;
+
+    /* Method 1: Check registry (HKLM\SOFTWARE\Microsoft\Xbox\2.0\SDK) */
+    {
+        HKEY hKey = NULL;
+        static const WCHAR *regPaths[] = {
+            L"SOFTWARE\\Microsoft\\Xbox\\2.0\\SDK",
+            L"SOFTWARE\\Wow6432Node\\Microsoft\\Xbox\\2.0\\SDK",
+            NULL
+        };
+        for (int i = 0; regPaths[i] && !g_ins.systemSdkFound; i++) {
+            if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, regPaths[i], 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+                WCHAR sdkPath[NXI_MAX_PATH];
+                DWORD pathSize = sizeof(sdkPath);
+                if (RegQueryValueExW(hKey, L"InstallPath", NULL, NULL, (LPBYTE)sdkPath, &pathSize) == ERROR_SUCCESS) {
+                    /* Strip trailing backslash if present */
+                    int len = (int)wcslen(sdkPath);
+                    if (len > 0 && sdkPath[len - 1] == L'\\') sdkPath[len - 1] = L'\0';
+
+                    /* Check for bin + include directories (matches IDE's toolchain.ts detection) */
+                    WCHAR probe[NXI_MAX_PATH];
+                    wsprintfW(probe, L"%s\\bin", sdkPath);
+                    BOOL hasBin = sIsDirectoryW(probe);
+                    wsprintfW(probe, L"%s\\include", sdkPath);
+                    BOOL hasInc = sIsDirectoryW(probe);
+                    if (hasBin && hasInc) {
+                        g_ins.systemSdkFound = TRUE;
+                        wcscpy(g_ins.systemSdkPath, sdkPath);
+                    }
+                }
+                RegCloseKey(hKey);
+            }
+        }
+    }
+
+    /* Method 2: Check common install paths */
+    if (!g_ins.systemSdkFound) {
+        static const WCHAR *sdkPaths[] = {
+            L"C:\\Program Files (x86)\\Microsoft Xbox 360 SDK",
+            L"C:\\Program Files\\Microsoft Xbox 360 SDK",
+            L"D:\\Program Files (x86)\\Microsoft Xbox 360 SDK",
+            NULL
+        };
+        for (int i = 0; sdkPaths[i] && !g_ins.systemSdkFound; i++) {
+            WCHAR probeBin[NXI_MAX_PATH];
+            WCHAR probeInc[NXI_MAX_PATH];
+            wsprintfW(probeBin, L"%s\\bin", sdkPaths[i]);
+            wsprintfW(probeInc, L"%s\\include", sdkPaths[i]);
+            if (sIsDirectoryW(probeBin) && sIsDirectoryW(probeInc)) {
+                g_ins.systemSdkFound = TRUE;
+                wcscpy(g_ins.systemSdkPath, sdkPaths[i]);
+            }
+        }
+    }
+
+
+    /* ── Check for Visual Studio 2010 ── */
+    g_ins.vs2010Found = FALSE;
+    {
+        static const WCHAR *vs2010Paths[] = {
+            L"C:\\Program Files (x86)\\Microsoft Visual Studio 10.0\\Common7\\IDE\\devenv.exe",
+            L"C:\\Program Files\\Microsoft Visual Studio 10.0\\Common7\\IDE\\devenv.exe",
+            NULL
+        };
+        for (int i = 0; vs2010Paths[i]; i++) {
+            if (NxIns_FileExists(vs2010Paths[i])) {
+                g_ins.vs2010Found = TRUE;
+                break;
+            }
+        }
+        if (!g_ins.vs2010Found) {
+            HKEY hKey = NULL;
+            if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\VisualStudio\\10.0", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+                g_ins.vs2010Found = TRUE;
+                RegCloseKey(hKey);
+            }
+            if (!g_ins.vs2010Found && RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Wow6432Node\\Microsoft\\VisualStudio\\10.0", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+                g_ins.vs2010Found = TRUE;
+                RegCloseKey(hKey);
+            }
+        }
+    }
+
+    /* ── Check for VC++ 2010 runtime DLLs ── */
+    g_ins.vcRuntimeFound = FALSE;
+    {
+        WCHAR winDir[NXI_MAX_PATH];
+        WCHAR probe[NXI_MAX_PATH];
+        GetWindowsDirectoryW(winDir, NXI_MAX_PATH);
+
+        wsprintfW(probe, L"%s\\SysWOW64\\msvcr100.dll", winDir);
+        if (NxIns_FileExists(probe)) {
+            wsprintfW(probe, L"%s\\SysWOW64\\msvcp100.dll", winDir);
+            if (NxIns_FileExists(probe))
+                g_ins.vcRuntimeFound = TRUE;
+        }
+        if (!g_ins.vcRuntimeFound) {
+            wsprintfW(probe, L"%s\\System32\\msvcr100.dll", winDir);
+            if (NxIns_FileExists(probe)) {
+                wsprintfW(probe, L"%s\\System32\\msvcp100.dll", winDir);
+                if (NxIns_FileExists(probe))
+                    g_ins.vcRuntimeFound = TRUE;
+            }
+        }
+    }
 }
 
 
@@ -1860,8 +2031,13 @@ DWORD WINAPI NxIns_InstallThread(LPVOID param)
         goto done;
     }
 
-    /* Step 2: Extract Xbox 360 SDK (if installer was found and user opted in) */
-    if (g_ins.sdkInstallerFound && (g_ins.components & NXI_COMP_SDK_EXTRACT)) {
+    /* Step 2: Xbox 360 SDK */
+    if (g_ins.systemSdkFound) {
+        /* SDK already installed on system — the IDE will detect it automatically
+         * at the standard path (e.g. C:\Program Files (x86)\Microsoft Xbox 360 SDK).
+         * No junction or extraction needed. */
+        NxIns_SetStatus(L"Xbox 360 SDK detected \x2014 using existing system installation.");
+    } else if (g_ins.sdkInstallerFound && (g_ins.components & NXI_COMP_SDK_EXTRACT)) {
         NxIns_SetStatus(L"Extracting Xbox 360 SDK...");
         if (!NxIns_ExtractSdk()) {
             if (!g_ins.installCancelled)
@@ -1870,7 +2046,38 @@ DWORD WINAPI NxIns_InstallThread(LPVOID param)
     }
 
     /* Step 3: Install VC++ 2010 runtime & copy DLLs into SDK bin */
-    NxIns_InstallVCRuntime();
+    if (g_ins.vcRuntimeFound || g_ins.vs2010Found) {
+        NxIns_SetStatus(L"VC++ 2010 runtime already present \x2014 skipping installer.");
+    } else {
+        NxIns_InstallVCRuntime();
+    }
+    /* Always copy DLLs into SDK bin folder regardless */
+    {
+        WCHAR sdkBin[NXI_MAX_PATH];
+        if (g_ins.systemSdkFound) {
+            /* System SDK — copy DLLs into its bin\win32 */
+            wsprintfW(sdkBin, L"%s\\bin\\win32", g_ins.systemSdkPath);
+        } else {
+            /* Bundled/extracted SDK */
+            wsprintfW(sdkBin, L"%s\\SDK\\XDK\\bin\\win32", g_ins.installDir);
+        }
+        if (GetFileAttributesW(sdkBin) != INVALID_FILE_ATTRIBUTES) {
+            static const WCHAR *dlls[] = { L"msvcr100.dll", L"msvcp100.dll" };
+            WCHAR winDir[NXI_MAX_PATH];
+            GetWindowsDirectoryW(winDir, NXI_MAX_PATH);
+            for (int i = 0; i < 2; i++) {
+                WCHAR dst[NXI_MAX_PATH];
+                wsprintfW(dst, L"%s\\%s", sdkBin, dlls[i]);
+                if (!NxIns_FileExists(dst)) {
+                    WCHAR src[NXI_MAX_PATH];
+                    wsprintfW(src, L"%s\\SysWOW64\\%s", winDir, dlls[i]);
+                    if (!NxIns_FileExists(src))
+                        wsprintfW(src, L"%s\\System32\\%s", winDir, dlls[i]);
+                    CopyFileW(src, dst, FALSE);
+                }
+            }
+        }
+    }
 
     /* Step 4: Create shortcuts */
     if (!NxIns_CreateShortcuts()) {
@@ -1922,9 +2129,16 @@ static void sDeleteDirectoryContents(const WCHAR *dir)
         wsprintfW(fullPath, L"%s\\%s", dir, fd.cFileName);
 
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-            /* Recurse into subdirectory */
-            sDeleteDirectoryContents(fullPath);
-            RemoveDirectoryW(fullPath);
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
+                /* This is a junction or symlink — remove the link itself,
+                 * do NOT recurse into it or we'd delete the target's files
+                 * (e.g. the system Xbox 360 SDK). */
+                RemoveDirectoryW(fullPath);
+            } else {
+                /* Regular directory — recurse */
+                sDeleteDirectoryContents(fullPath);
+                RemoveDirectoryW(fullPath);
+            }
         } else {
             /* Skip uninstaller (it's still running) */
             if (wcscmp(fd.cFileName, NXI_UNINSTALLER_EXE) == 0)
@@ -2361,8 +2575,8 @@ static void sHandleClick(HWND hwnd, int mx, int my)
             InvalidateRect(hwnd, NULL, FALSE);
         }
 
-        /* SDK extract checkbox (index 3, only if found) */
-        if (g_ins.sdkInstallerFound) {
+        /* SDK extract checkbox (index 3, only if found and system SDK not present) */
+        if (g_ins.sdkInstallerFound && !g_ins.systemSdkFound) {
             y += sp;
             RECT sdkRc = { contentX, y, contentX + 400, y + 20 };
             if (sPtInRect(&sdkRc, mx, my)) {
@@ -2503,6 +2717,17 @@ void NxIns_SetPage(int page)
         NxIns_ScanForSdkInstaller();
     }
 
+    /* Run pre-flight system detection on components page */
+    if (page == NXI_PAGE_COMPONENTS) {
+        NxIns_PreflightCheck();
+
+        /* If the system SDK is already installed, disable the extract option —
+         * the IDE will use the system SDK directly. */
+        if (g_ins.systemSdkFound) {
+            g_ins.components &= ~NXI_COMP_SDK_EXTRACT;
+        }
+    }
+
     InvalidateRect(g_ins.hwndMain, NULL, FALSE);
 }
 
@@ -2616,9 +2841,20 @@ static BOOL sIsAlreadyInstalled(WCHAR *outInstallDir, int maxLen)
                              (BYTE *)outInstallDir, &dirSize) == ERROR_SUCCESS &&
             outInstallDir[0] != L'\0') {
             RegCloseKey(hKey);
-            return TRUE;
+            /* Verify the installation actually exists on disk.
+             * A previous uninstall may have deleted files but failed to
+             * remove the HKLM key (e.g. insufficient privileges). */
+            WCHAR exePath[NXI_MAX_PATH];
+            wsprintfW(exePath, L"%s\\%s", outInstallDir, NXI_APP_EXE);
+            if (GetFileAttributesW(exePath) != INVALID_FILE_ATTRIBUTES) {
+                return TRUE;
+            }
+            /* Stale registry entry — try to clean it up */
+            RegDeleteKeyW(HKEY_LOCAL_MACHINE, NXI_REGISTRY_KEY);
+            outInstallDir[0] = L'\0';
+        } else {
+            RegCloseKey(hKey);
         }
-        RegCloseKey(hKey);
     }
 
     /* Try HKCU */
@@ -2628,9 +2864,18 @@ static BOOL sIsAlreadyInstalled(WCHAR *outInstallDir, int maxLen)
                              (BYTE *)outInstallDir, &dirSize) == ERROR_SUCCESS &&
             outInstallDir[0] != L'\0') {
             RegCloseKey(hKey);
-            return TRUE;
+            /* Same check: verify installation actually exists */
+            WCHAR exePath[NXI_MAX_PATH];
+            wsprintfW(exePath, L"%s\\%s", outInstallDir, NXI_APP_EXE);
+            if (GetFileAttributesW(exePath) != INVALID_FILE_ATTRIBUTES) {
+                return TRUE;
+            }
+            /* Stale registry entry — clean up */
+            RegDeleteKeyW(HKEY_CURRENT_USER, NXI_REGISTRY_KEY);
+            outInstallDir[0] = L'\0';
+        } else {
+            RegCloseKey(hKey);
         }
-        RegCloseKey(hKey);
     }
 
     return FALSE;
@@ -2692,36 +2937,39 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         return 0;
     }
 
-    /* Check if already installed */
-    WCHAR existingDir[NXI_MAX_PATH] = {0};
-    if (sIsAlreadyInstalled(existingDir, NXI_MAX_PATH)) {
-        WCHAR msg[NXI_MAX_PATH + 256];
-        wsprintfW(msg,
-            L"Nexia IDE is already installed at:\n\n"
-            L"%s\n\n"
-            L"What would you like to do?\n\n"
-            L"  Yes  =  Uninstall (remove Nexia IDE)\n"
-            L"  No   =  Reinstall (overwrite current installation)\n"
-            L"  Cancel  =  Exit",
-            existingDir);
-
-        int result = MessageBoxW(NULL, msg, L"Nexia IDE Setup",
-                                 MB_YESNOCANCEL | MB_ICONQUESTION);
-
-        if (result == IDYES) {
-            /* Uninstall — user already confirmed via the Yes/No/Cancel dialog */
-            CoInitialize(NULL);
-            NxIns_Uninstall(TRUE);
-            CoUninitialize();
-            return 0;
-        } else if (result == IDCANCEL) {
-            /* Exit */
-            return 0;
-        }
-        /* IDNO = continue with reinstall */
-    }
-
     if (!NxIns_Init(hInstance)) return 1;
+
+    /* Check if already installed (registry + filesystem verified).
+     * If so, offer Uninstall / Reinstall / Cancel before the wizard. */
+    {
+        WCHAR existingDir[NXI_MAX_PATH] = {0};
+        if (sIsAlreadyInstalled(existingDir, NXI_MAX_PATH)) {
+            WCHAR msg[NXI_MAX_PATH + 256];
+            wsprintfW(msg,
+                L"Nexia IDE is already installed at:\n\n"
+                L"%s\n\n"
+                L"What would you like to do?\n\n"
+                L"  Yes  =  Uninstall (remove Nexia IDE)\n"
+                L"  No   =  Reinstall (overwrite current installation)\n"
+                L"  Cancel  =  Exit",
+                existingDir);
+
+            int result = MessageBoxW(NULL, msg, L"Nexia IDE Setup",
+                                     MB_YESNOCANCEL | MB_ICONQUESTION);
+
+            if (result == IDYES) {
+                /* Uninstall */
+                CoInitialize(NULL);
+                NxIns_Uninstall(TRUE);
+                CoUninitialize();
+                return 0;
+            } else if (result == IDCANCEL) {
+                return 0;
+            }
+            /* IDNO = reinstall — pre-fill path and continue to wizard */
+            wcsncpy(g_ins.installDir, existingDir, NXI_MAX_PATH - 1);
+        }
+    }
 
     if (!NxIns_CreateWindow(nCmdShow)) return 1;
 

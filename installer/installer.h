@@ -255,6 +255,13 @@ typedef struct {
     int             sdkCabsDone;
     int             sdkFilesExtracted;
 
+    /* Pre-flight detection */
+    BOOL            preflightDone;
+    BOOL            systemSdkFound;         /* Xbox 360 SDK already installed on system */
+    WCHAR           systemSdkPath[NXI_MAX_PATH];
+    BOOL            vs2010Found;            /* Visual Studio 2010 detected */
+    BOOL            vcRuntimeFound;         /* msvcr100.dll + msvcp100.dll already present */
+
 } NxInstaller;
 
 /* ── Global instance ── */
