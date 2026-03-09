@@ -58,6 +58,24 @@ if "!CC!"=="" for %%G in (gcc.exe) do if not "%%~$PATH:G"=="" set "CC=gcc.exe" &
 if "!CC!"=="" ( echo    [X] No MinGW compiler found! & goto :error )
 echo    [OK] Compiler: !CC!
 
+REM -- Verify windres is actually on PATH; try fallbacks if not --
+set "WR_OK="
+for %%G in (!WR!) do if not "%%~$PATH:G"=="" set "WR_OK=1"
+if not defined WR_OK (
+    REM Prefixed windres not found — try plain windres.exe
+    for %%G in (windres.exe) do if not "%%~$PATH:G"=="" set "WR=windres.exe" & set "WR_OK=1"
+)
+if not defined WR_OK (
+    REM Try to find windres next to the compiler
+    for %%G in (!CC!) do set "CC_DIR=%%~dp$PATH:G"
+    if exist "!CC_DIR!windres.exe" set "WR=!CC_DIR!windres.exe" & set "WR_OK=1"
+)
+if defined WR_OK (
+    echo    [OK] Resource compiler: !WR!
+) else (
+    echo    [^^!^^!] WARNING: windres not found — resources will not be embedded
+)
+
 if exist "node_modules\.bin\electron-builder.cmd" (
     echo    [OK] electron-builder found
 ) else (
@@ -219,10 +237,28 @@ REM ======================================
 :compile_installer
 set "INS_CFLAGS=-O2 -Wall -Wno-unused-parameter -Wno-missing-field-initializers -DUNICODE -D_UNICODE -DWINVER=0x0500 -D_WIN32_WINNT=0x0500 -Iinstaller"
 set "INS_RES="
-if exist "installer\installer.rc" (
-    %WR% installer\installer.rc -o dist\installer.res.o 2>nul
-    if not errorlevel 1 set "INS_RES=dist\installer.res.o"
+if not exist "installer\installer.rc" goto :skip_res
+if not defined WR_OK goto :skip_res
+
+REM Use --include-dir so windres resolves paths in the .rc file
+REM (e.g. "installer.manifest", "resources\icon.ico") relative to
+REM the installer\ directory — not relative to the project root.
+"!WR!" --include-dir installer installer\installer.rc -o dist\installer.res.o
+if errorlevel 1 (
+    echo    [X] Resource compilation failed.
+    echo        The UAC manifest will NOT be embedded. Installer will not request admin.
+    echo        Check that installer.manifest and resources\icon.ico exist in installer\.
+    exit /b 1
 )
+set "INS_RES=dist\installer.res.o"
+echo    [OK] Resources compiled (manifest + icon embedded)
+goto :do_cc
+
+:skip_res
+echo    [^^!^^!] WARNING: Skipping resources — windres not found or installer.rc missing.
+echo        The installer will have no icon and no UAC manifest.
+
+:do_cc
 %CC% %INS_CFLAGS% -mwindows installer\installer.c %INS_RES% -o dist\setup_base.exe -luser32 -lgdi32 -lcomctl32 -lshell32 -lshlwapi -lole32 -ladvapi32 -lcomdlg32 -luuid -lcabinet -static -static-libgcc
 if errorlevel 1 (
     echo    [X] Installer compilation failed!
