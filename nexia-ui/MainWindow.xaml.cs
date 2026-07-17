@@ -43,7 +43,7 @@ namespace NexiaUI
             _panels["search"]     = new SearchPanel { ProjectPath = kProject, OpenAt = OpenFileAt };
             _panels["ai"]         = new StubPanel("AI TUTOR", "Multi-provider assistant (Anthropic, OpenAI, Ollama): streaming chat, code generation, inline explain / fix / refactor, and proactive tutoring.");
             _panels["git"]        = new GitPanel { RepoDir = kProject, OpenFile = OpenFileByPath, Log = Append };
-            _panels["extensions"] = new StubPanel("EXTENSIONS", "Install community tools, templates, snippet packs, themes and plugins from .zip files or folders.");
+            _panels["extensions"] = new ExtensionsPanel();
             _panels["devkit"]     = new StubPanel("DEVKIT", "Connect to a dev kit over the network: deploy builds, reboot, screenshot, browse the file system, watch CPU/memory.");
             _panels["emulator"]   = new StubPanel("EMULATOR (Nexia 360)", "Launch and debug builds: breakpoints, registers, step, read/write memory, backtraces.");
             _panels["learn"]      = new StubPanel("LEARN", "The cinematic lesson system: 17 lessons across 8 modules, typing animations, mastery tracking, quizzes, flashcards, and cloud lessons.");

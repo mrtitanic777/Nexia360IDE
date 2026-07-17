@@ -1,0 +1,28 @@
+<UserControl x:Class="NexiaUI.ExtensionsPanel"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             Foreground="{StaticResource Text}">
+    <DockPanel>
+        <TextBlock DockPanel.Dock="Top" Text="EXTENSIONS" FontWeight="SemiBold"
+                   FontSize="11" Margin="10,8" Foreground="{StaticResource Accent}"/>
+        <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" Margin="8,6">
+            <Button Content="Open Folder" Width="90" Click="OnOpenFolder"
+                    Background="{StaticResource ChromeBg}" Foreground="{StaticResource Text}"/>
+            <Button Content="Refresh" Width="70" Margin="6,0,0,0" Click="OnRefresh"
+                    Background="{StaticResource ChromeBg}" Foreground="{StaticResource Text}"/>
+        </StackPanel>
+        <TextBlock DockPanel.Dock="Bottom" x:Name="DirText" Margin="10,0,10,4"
+                   Foreground="#66666E" FontSize="10" TextTrimming="CharacterEllipsis"/>
+        <ListBox x:Name="List" Background="Transparent" BorderThickness="0"
+                 Foreground="{StaticResource Text}">
+            <ListBox.ItemTemplate>
+                <DataTemplate>
+                    <StackPanel Margin="2,3">
+                        <TextBlock Text="{Binding Name}" FontWeight="SemiBold"/>
+                        <TextBlock Text="{Binding Detail}" Foreground="{StaticResource TextDim}" FontSize="11"/>
+                    </StackPanel>
+                </DataTemplate>
+            </ListBox.ItemTemplate>
+        </ListBox>
+    </DockPanel>
+</UserControl>
