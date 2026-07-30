@@ -4,7 +4,7 @@
  *     npx tsc && node scripts/gen-templates.js
  *
  * The project template table, from projectManager.ts's getTemplates().
- * 6 templates, 22 files, 37460 bytes of content.
+ * 6 templates, 22 files, 39214 bytes of content.
  *
  * Proven byte-for-byte against the TypeScript by core/test/templates-parity.js.
  */
