@@ -473,20 +473,13 @@ function scheduleCloudSync() {
         if (_pullInFlight) { scheduleCloudSync(); return; }
         try {
             const cloudData: any = { ...userSettings };
-            // Never upload API keys to the cloud — they stay on this machine only.
+            // Never upload secrets to the cloud. API keys AND Discord/GitHub tokens
+            // stay on this machine only — they were previously written to the server
+            // DB in plaintext. Discord/GitHub are re-authorised per device instead
+            // of being restored from the cloud.
             for (const f of SECRET_FIELDS) delete cloudData[f];
-            // Also include Discord auth if present
-            const _dau = getDiscordAuthUser();
-            if (_dau) {
-                cloudData.discord = _dau;
-            }
-            // Include GitHub config if present
-            const ghConfigFile = nodePath.join(nodeOs.homedir(), '.nexia-ide-github.json');
-            try {
-                if (nodeFs.existsSync(ghConfigFile)) {
-                    cloudData.github = JSON.parse(nodeFs.readFileSync(ghConfigFile, 'utf-8'));
-                }
-            } catch {}
+            delete cloudData.discord;
+            delete cloudData.github;
             await authService.saveCloudSettings(cloudData);
         } catch {}
     }, 2000); // 2 second debounce
@@ -534,25 +527,9 @@ async function pullCloudSettings() {
         // Save merged settings locally (secrets stay redacted; encrypted separately)
         writePrefsFile();
 
-        // Restore Discord auth from cloud
-        if (cloud.discord && cloud.discord.accessToken) {
-            setDiscordAuthUser({
-                id: cloud.discord.id,
-                username: cloud.discord.username,
-                avatarUrl: cloud.discord.avatarUrl || null,
-            });
-            // Also persist to main process
-            await ipcRenderer.invoke(IPC.DISCORD_AUTH_START).catch(() => {});
-            // Store the discord user data for the main process
-            const discordSettingsFile = nodePath.join(nodeOs.homedir(), '.nexia-ide-discord-user.json');
-            try { nodeFs.writeFileSync(discordSettingsFile, JSON.stringify(cloud.discord, null, 2)); } catch {}
-        }
-
-        // Restore GitHub auth from cloud
-        if (cloud.github && cloud.github.token) {
-            const ghConfigFile = nodePath.join(nodeOs.homedir(), '.nexia-ide-github.json');
-            try { nodeFs.writeFileSync(ghConfigFile, JSON.stringify(cloud.github, null, 2)); } catch {}
-        }
+        // Discord/GitHub auth is no longer restored from the cloud: those tokens
+        // are not uploaded anymore (they would sit in the server DB in plaintext).
+        // Users sign in to Discord/GitHub on each device instead.
 
         // Apply theme
         applyThemeColors();
