@@ -20,7 +20,7 @@
  */
 const fs = require('fs');
 const path = require('path');
-const { execFileSync } = require('child_process');
+const { execFileSync, spawnSync } = require('child_process');
 
 const ROOT = path.join(__dirname, '..');
 const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
@@ -74,9 +74,24 @@ if (!force) {
 const mainJs = path.join(ROOT, 'dist', 'main', 'main.js');
 if (!fs.existsSync(mainJs)) fail('dist/main/main.js is missing — run `npm run build` first.');
 
-const NSIS = path.join(process.env.LOCALAPPDATA, 'electron-builder', 'Cache', 'nsis',
-                       'nsis-3.0.4.1', 'Bin', 'makensis.exe');
-if (!fs.existsSync(NSIS)) fail(`makensis not found at ${NSIS}`);
+// Resolve makensis: prefer one on PATH (a real install), then the stable
+// per-user copy, then electron-builder's cache as a last resort. Keeping the
+// build off the cache means an electron-builder cleanup can't break releases.
+function findMakensis() {
+    if (spawnSync('makensis', ['/VERSION'], { stdio: 'ignore', shell: true }).status === 0) {
+        return 'makensis';
+    }
+    const local = process.env.LOCALAPPDATA || '';
+    for (const c of [
+        path.join(local, 'Programs', 'NSIS', 'Bin', 'makensis.exe'),
+        path.join(local, 'electron-builder', 'Cache', 'nsis', 'nsis-3.0.4.1', 'Bin', 'makensis.exe'),
+    ]) {
+        if (c && fs.existsSync(c)) return c;
+    }
+    return null;
+}
+const NSIS = findMakensis();
+if (!NSIS) fail('makensis not found on PATH or in a known install location.\nInstall NSIS (and add its Bin to PATH), or run `npm i` to populate electron-builder\'s cache.');
 
 // The numeric part alone, for the Windows version resource: it takes four
 // numbers, so "3.3.0-dev" has to arrive there as "3.3.0". The full string keeps
