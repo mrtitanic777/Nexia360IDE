@@ -177,7 +177,15 @@ Section "Update"
   DetailPrint "Done."
 
   ${If} $ForceRun == "1"
+    !insertmacro Log "relaunching Nexia IDE via Explorer"
     DetailPrint "Starting Nexia IDE..."
-    ExecShell "open" "$INSTDIR\NexiaIDE.exe"
+    ; Launch through the shell (Explorer), not ExecShell/Exec on the exe directly.
+    ; ExecShell "open" from a SILENT installer that exits an instant later is
+    ; fire-and-forget: the launch can be lost in the race with setup's own exit,
+    ; so the update lands but the app never comes back — exactly the "updated but
+    ; didn't relaunch" report. Handing the launch to Explorer (always running,
+    ; outlives setup) makes it reliable, and starts the IDE at the user's own
+    ; integrity level even if setup happened to be elevated.
+    Exec '"$WINDIR\explorer.exe" "$INSTDIR\NexiaIDE.exe"'
   ${EndIf}
 SectionEnd

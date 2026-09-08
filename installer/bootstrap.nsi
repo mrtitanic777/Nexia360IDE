@@ -615,13 +615,17 @@ Section "Install"
   ; Relaunch after a silent update, or the user is left with nothing running
   ; and assumes the update broke the app.
   ;
-  ; ExecShell rather than Exec: setup runs as the user here, but ExecShell also
-  ; keeps the new process off setup's handles so the app doesn't hold this
-  ; installer alive.
+  ; Launch through the shell (Explorer), not ExecShell/Exec on the exe directly.
+  ; ExecShell "open" from a SILENT installer that exits an instant later is
+  ; fire-and-forget: the launch can be lost in the race with setup's own exit, so
+  ; the update lands but the app never comes back. Handing the launch to Explorer
+  ; (always running, outlives setup) makes it reliable and keeps the new process
+  ; off setup's handles, and starts the IDE at the user's own integrity level even
+  ; if setup happened to be elevated.
   ${If} $ForceRun == "1"
-    !insertmacro Log "Starting Nexia IDE..."
+    !insertmacro Log "relaunching Nexia IDE via Explorer"
     DetailPrint "Starting Nexia IDE..."
-    ExecShell "open" "$INSTDIR\NexiaIDE.exe"
+    Exec '"$WINDIR\explorer.exe" "$INSTDIR\NexiaIDE.exe"'
   ${EndIf}
 
   !insertmacro Log "Done."
