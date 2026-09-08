@@ -24,6 +24,7 @@ Unicode true
 !include "LogicLib.nsh"
 !include "WinVer.nsh"
 !include "FileFunc.nsh"
+!include "TextFunc.nsh"
 
 !define APPNAME       "Nexia IDE"
 !define COMPANY       "Nexia"
@@ -433,6 +434,10 @@ Section "Install"
   ; JavaScript that calls it.
   SetOutPath "$BuildDir\dist"
   File "..\dist\nexia-core.exe"
+  ; extract_sdk.exe — pulls the Xbox 360 SDK out of the XDK installer's cabs
+  ; without installing it. Ships beside nexia-core.exe so the running IDE (and the
+  ; install-time step below) can invoke it. Also prebuilt: it is C, like the core.
+  File "..\dist\extract_sdk.exe"
 
   ${IfNot} ${FileExists} "$BuildDir\dist\main\main.js"
     !insertmacro Fail "The build did not produce dist\main\main.js."
@@ -577,6 +582,38 @@ Section "Install"
     !insertmacro Log "  rcedit download failed — exe keeps Electron's icon/version"
   ${EndIf}
   Delete "$BuildDir\rcedit.exe"
+
+  ; ---- 6b. Bundle the Xbox 360 SDK, if an installer is on the machine --------
+  ;
+  ; Best-effort and never fatal. extract_sdk.exe --find looks for an XDK installer
+  ; already present; if it finds one, we decompress its cabs into $INSTDIR\SDK\XDK
+  ; — the exact path nexia-core treats as a bundled SDK (it is handed
+  ; --exe-dir = $INSTDIR at runtime). A fresh install can then compile immediately.
+  ; If nothing is found, we skip it silently: the Welcome screen lets the user
+  ; point at an installer .exe later, which runs this same extractor.
+  ${IfNot} ${FileExists} "$INSTDIR\SDK\XDK\bin\*.*"
+    !insertmacro Log "Looking for an Xbox 360 SDK installer to bundle..."
+    DetailPrint "Looking for an Xbox 360 SDK installer..."
+    nsExec::ExecToStack '"$INSTDIR\resources\app\dist\extract_sdk.exe" --find'
+    Pop $0
+    Pop $1
+    ${TrimNewLines} $1 $1
+    ${If} $0 == 0
+    ${AndIf} $1 != ""
+    ${AndIf} ${FileExists} "$1"
+      !insertmacro Log "  extracting SDK from: $1"
+      DetailPrint "Extracting Xbox 360 SDK (this can take a minute)..."
+      nsExec::ExecToLog '"$INSTDIR\resources\app\dist\extract_sdk.exe" "$1" "$INSTDIR"'
+      Pop $0
+      ${If} $0 == 0
+        !insertmacro Log "  SDK bundled at $INSTDIR\SDK\XDK"
+      ${Else}
+        !insertmacro Log "  SDK extraction failed ($0) — user can extract from the Welcome screen"
+      ${EndIf}
+    ${Else}
+      !insertmacro Log "  no SDK installer found — user can extract from the Welcome screen"
+    ${EndIf}
+  ${EndIf}
 
   ; ---- 7. Shortcuts, registry ------------------------------------
   CreateShortcut "$SMPROGRAMS\${APPNAME}.lnk" "$INSTDIR\NexiaIDE.exe"

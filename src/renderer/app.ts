@@ -17,6 +17,7 @@ const IPC = {
     SDK_GET_PATHS: 'sdk:getPaths', SDK_GET_TOOLS: 'sdk:getTools',
     SDK_PREP_REGISTRY: 'sdk:prepRegistry', SDK_CLEANUP_REGISTRY: 'sdk:cleanupRegistry',
     SDK_INSTALL_STATE: 'sdk:installState',
+    SDK_EXTRACT: 'sdk:extract',
     PROJECT_NEW: 'project:new', PROJECT_OPEN: 'project:open',
     PROJECT_SAVE: 'project:save', PROJECT_GET_CONFIG: 'project:getConfig',
     PROJECT_GET_TEMPLATES: 'project:getTemplates',
@@ -2533,9 +2534,10 @@ async function checkSetup(appState: any) {
         $('status-sdk').textContent = appState.sdkBundled
             ? '✓ SDK: Bundled'
             : `✓ SDK: ${nodePath.basename(sdkRoot)}`;
-        // Hide download and partial sections if SDK is found
+        // Hide download, partial and extract sections if SDK is found
         $('setup-sdk-download').classList.add('hidden');
         $('setup-sdk-partial').classList.add('hidden');
+        $('setup-sdk-extract').classList.add('hidden');
     } else if (appState.sdkInstallState === 'partial') {
         // Partial install: has bin/ but missing include/ and lib/
         $('setup-sdk-status').className = 'sdk-missing';
@@ -2544,6 +2546,7 @@ async function checkSetup(appState: any) {
         $('statusbar').classList.add('status-error');
         $('setup-sdk-download').classList.add('hidden');
         $('setup-sdk-partial').classList.remove('hidden');
+        $('setup-sdk-extract').classList.remove('hidden');
         if (appState.sdkPartialPath) {
             $('setup-sdk-partial-path').textContent = `Found at: ${appState.sdkPartialPath}`;
         }
@@ -2552,9 +2555,10 @@ async function checkSetup(appState: any) {
         $('setup-sdk-status').textContent = '✗ Xbox 360 SDK not found';
         $('status-sdk').textContent = '✗ SDK not configured';
         $('statusbar').classList.add('status-error');
-        // Show download section
+        // Show download + extract sections
         $('setup-sdk-download').classList.remove('hidden');
         $('setup-sdk-partial').classList.add('hidden');
+        $('setup-sdk-extract').classList.remove('hidden');
     }
     if (appState.firstRun) $('setup-overlay').classList.remove('hidden');
 }
@@ -2574,6 +2578,7 @@ $('setup-detect').addEventListener('click', async () => {
         $('setup-sdk-status').innerHTML = `✓ Found SDK ${badge}<br><span style="font-size:11px;color:var(--text-dim)">${result.paths.root}</span>`;
         $('setup-sdk-download').classList.add('hidden');
         $('setup-sdk-partial').classList.add('hidden');
+        $('setup-sdk-extract').classList.add('hidden');
     } else {
         // Check if it's a partial install
         const installState = await ipcRenderer.invoke(IPC.SDK_INSTALL_STATE);
@@ -2582,14 +2587,16 @@ $('setup-detect').addEventListener('click', async () => {
             $('setup-sdk-status').textContent = '⚠ Xbox 360 SDK partially installed (missing headers & libraries)';
             $('setup-sdk-download').classList.add('hidden');
             $('setup-sdk-partial').classList.remove('hidden');
+            $('setup-sdk-extract').classList.remove('hidden');
             if (installState.partialPath) {
                 $('setup-sdk-partial-path').textContent = `Found at: ${installState.partialPath}`;
             }
         } else {
             $('setup-sdk-status').className = 'sdk-missing';
-            $('setup-sdk-status').textContent = '✗ Could not auto-detect. Browse manually or download below.';
+            $('setup-sdk-status').textContent = '✗ Could not auto-detect. Extract from the installer .exe, browse manually, or download below.';
             $('setup-sdk-download').classList.remove('hidden');
             $('setup-sdk-partial').classList.add('hidden');
+            $('setup-sdk-extract').classList.remove('hidden');
         }
     }
 });
@@ -2597,6 +2604,44 @@ $('setup-download-btn').addEventListener('click', () => {
     // Open SDK download page in the user's browser
     shell.openExternal('https://archive.org/download/xbox-360-sdk-21256.3_202204/XBOX360%20SDK%2021256.3.zip');
     appendOutput('SDK download page opened in browser. After installing, click Auto-Detect.\n');
+});
+$('setup-extract-btn').addEventListener('click', async () => {
+    const btn = $('setup-extract-btn') as HTMLButtonElement;
+    const status = $('setup-extract-status');
+    btn.disabled = true;
+    status.textContent = 'Choose your Xbox 360 SDK installer (.exe)…';
+    status.style.color = 'var(--text-dim)';
+    const onProg = (_e: any, p: any) => {
+        const line = String(p.line || '').split('\n').map(s => s.trim()).filter(Boolean).pop();
+        if (line) status.textContent = line;
+    };
+    ipcRenderer.on('sdk:extractProgress', onProg);
+    let res: any;
+    try {
+        res = await ipcRenderer.invoke(IPC.SDK_EXTRACT);
+    } finally {
+        ipcRenderer.removeListener('sdk:extractProgress', onProg);
+    }
+    if (res && res.success && res.paths) {
+        ($('setup-sdk-path') as HTMLInputElement).value = res.paths.root;
+        $('setup-sdk-status').className = 'sdk-found';
+        $('setup-sdk-status').innerHTML = `✓ Xbox 360 SDK ready <span class="sdk-bundled-badge">📦 Bundled</span><br><span style="font-size:11px;color:var(--text-dim)">${res.paths.root}</span>`;
+        $('status-sdk').textContent = '✓ SDK: Bundled';
+        $('statusbar').classList.remove('status-error');
+        status.innerHTML = '✓ Extracted. The SDK is bundled with Nexia now — nothing was installed to your system.';
+        status.style.color = 'var(--xbox-green)';
+        $('setup-sdk-download').classList.add('hidden');
+        $('setup-sdk-partial').classList.add('hidden');
+        appendOutput('[SDK Extract] Bundled SDK ready at ' + (res.extractedTo || res.paths.root) + '\n');
+    } else if (res && res.error === 'cancelled') {
+        status.textContent = '';
+        btn.disabled = false;
+    } else {
+        status.innerHTML = '✗ ' + ((res && res.error) || 'Extraction failed.');
+        status.style.color = 'var(--error-red, #ff4444)';
+        appendOutput('[SDK Extract] Error: ' + ((res && res.error) || 'unknown') + '\n');
+        btn.disabled = false;
+    }
 });
 $('setup-prep-btn').addEventListener('click', async () => {
     $('setup-prep-status').textContent = 'Creating registry keys...';

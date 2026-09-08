@@ -273,6 +273,7 @@ export const IPC = {
     SDK_PREP_REGISTRY: 'sdk:prepRegistry',
     SDK_CLEANUP_REGISTRY: 'sdk:cleanupRegistry',
     SDK_INSTALL_STATE: 'sdk:installState',
+    SDK_EXTRACT: 'sdk:extract',
 
     // Project
     PROJECT_NEW: 'project:new',

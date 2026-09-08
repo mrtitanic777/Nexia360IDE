@@ -401,6 +401,15 @@
                     </div>
                     <button id="setup-detect" class="setup-btn">Auto-Detect</button>
                 </div>
+                <div id="setup-sdk-extract" class="setup-download hidden">
+                    <div class="setup-download-icon">📦</div>
+                    <div class="setup-download-text">
+                        <strong>Have the Xbox 360 SDK installer?</strong>
+                        <p>Point Nexia at the SDK installer <code>.exe</code> and it extracts everything it needs — headers, libraries and tools — <strong>without installing the SDK to your system.</strong> Nothing is run; the installer is only read.</p>
+                    </div>
+                    <button id="setup-extract-btn" class="setup-btn-download">Extract from SDK installer (.exe)…</button>
+                    <div id="setup-extract-status" style="margin-top:8px;font-size:12px;"></div>
+                </div>
                 <div id="setup-sdk-download" class="setup-download hidden">
                     <div class="setup-download-icon">⬇️</div>
                     <div class="setup-download-text">
@@ -415,7 +424,8 @@
                     <div class="setup-download-text">
                         <strong>Partial SDK Installation Detected</strong>
                         <p>Your SDK is missing <code>include/</code> and <code>lib/</code> directories needed for compilation. This happens when the SDK was installed without Visual Studio 2010.</p>
-                        <p>Nexia can fix this by temporarily adding registry keys so the SDK installer allows a Full Installation. <strong>This only touches Visual Studio 2010 application keys — it cannot affect Windows stability or boot.</strong></p>
+                        <p><strong>Easiest fix:</strong> use <em>Extract from SDK installer (.exe)</em> above — Nexia pulls the headers, libraries and tools straight out of the installer, with no reinstall.</p>
+                        <p>Or, to repair a system install instead, Nexia can temporarily add registry keys so the SDK installer allows a Full Installation. <strong>This only touches Visual Studio 2010 application keys — it cannot affect Windows stability or boot.</strong></p>
                     </div>
                     <div id="setup-sdk-partial-path" style="font-size:11px;color:var(--text-dim);margin-bottom:8px;"></div>
                     <button id="setup-prep-btn" class="setup-btn-download">Prepare for Full SDK Install</button>

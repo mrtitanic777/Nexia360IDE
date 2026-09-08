@@ -180,6 +180,9 @@ Section "Update"
   ; Unlike everything else here it cannot be rebuilt on the user's machine --
   ; they have no C compiler -- so it ships prebuilt.
   File "..\dist\nexia-core.exe"
+  ; extract_sdk.exe travels with it — the Welcome screen's "Extract from SDK
+  ; installer" flow and the install-time SDK bundling both invoke it.
+  File "..\dist\extract_sdk.exe"
 
   ${IfNot} ${FileExists} "$INSTDIR\resources\app\dist.new\main\main.js"
     RMDir /r "$INSTDIR\resources\app\dist.new"

@@ -232,6 +232,64 @@ function registerIpcHandlers() {
         return toolchain.cleanupSdkRegistry();
     });
 
+    /**
+     * Extract the SDK straight out of the XDK installer .exe — no system install.
+     *
+     * extract_sdk.exe opens the installer read-only, finds the embedded cabinet
+     * archives and decompresses them into <install>\SDK\XDK, which is exactly one
+     * of the "bundled" locations nexia-core's detect() already searches (it's
+     * handed --exe-dir = the install root). So a successful extract makes the very
+     * next detect() report a bundled SDK, and nothing is installed to the machine.
+     */
+    ipcMain.handle(IPC.SDK_EXTRACT, async (e, installerExe?: string) => {
+        try {
+            let exe = installerExe;
+            if (!exe) {
+                const r = await dialog.showOpenDialog({
+                    title: 'Select the Xbox 360 SDK installer (.exe)',
+                    filters: [{ name: 'SDK installer', extensions: ['exe'] }],
+                    properties: ['openFile'],
+                });
+                if (r.canceled || !r.filePaths[0]) return { success: false, error: 'cancelled' };
+                exe = r.filePaths[0];
+            }
+
+            // Beside nexia-core.exe (dist\extract_sdk.exe), resolved the same way.
+            const extractor = path.join(__dirname, '..', 'extract_sdk.exe');
+            if (!fs.existsSync(extractor)) {
+                return { success: false, error: `extract_sdk.exe not found at ${extractor}` };
+            }
+
+            // The install root: extract_sdk writes <destDir>\SDK\XDK, and detect()
+            // is given --exe-dir = this same directory, so it finds it as bundled.
+            const destDir = app.isPackaged
+                ? path.dirname(process.execPath)
+                : path.join(__dirname, '..', '..');
+
+            const { spawn } = require('child_process');
+            return await new Promise((resolve) => {
+                const child = spawn(extractor, [exe as string, destDir], { windowsHide: true });
+                let errBuf = '';
+                child.stdout.on('data', (d: Buffer) => {
+                    const line = d.toString();
+                    if (!e.sender.isDestroyed()) e.sender.send('sdk:extractProgress', { line });
+                });
+                child.stderr.on('data', (d: Buffer) => { errBuf += d.toString(); });
+                child.on('error', (err: any) => resolve({ success: false, error: err.message }));
+                child.on('close', async (code: number) => {
+                    if (code !== 0) {
+                        return resolve({ success: false, error: (errBuf.trim() || `extractor exited with code ${code}`) });
+                    }
+                    // Re-detect: the freshly extracted SDK should now win as bundled.
+                    const paths = await toolchain.detect();
+                    resolve({ success: !!paths, paths, bundled: toolchain.isBundled(), extractedTo: path.join(destDir, 'SDK', 'XDK') });
+                });
+            });
+        } catch (err: any) {
+            return { success: false, error: err.message };
+        }
+    });
+
     // ── Project ──
     ipcMain.handle(IPC.PROJECT_GET_TEMPLATES, async () => projectManager.getTemplates());
 
