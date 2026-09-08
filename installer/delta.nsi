@@ -60,6 +60,8 @@ VIAddVersionKey "OriginalFilename" "NexiaUpdate.exe"
 !insertmacro MUI_LANGUAGE "English"
 
 Var ForceRun
+Var InstArg
+Var RegLoc
 
 !macro Log MSG
   Push $8
@@ -93,12 +95,49 @@ Section "Update"
 
   !insertmacro Log "=== delta update to ${VERSION} ==="
 
+  ; ── Find the install to patch, wherever it is ────────────────────────────
+  ; InstallDir above is only a default guess; the full installer lets the user
+  ; pick any directory, so a delta that assumes the default silently patches the
+  ; wrong place (or nothing). Resolve in order of reliability, validating each —
+  ; never patch a directory that isn't actually the app:
+  ;   1. --instdir "<path>" from the running app: it executes from its own
+  ;      install, so this is exact. (Older apps don't pass it; they fall through.)
+  ;   2. InstallLocation, which the full installer records in the uninstall key
+  ;      for every install, custom directory or not.
+  ;   3. the default location, as a last resort.
+  ClearErrors
+  ${GetOptions} $R0 "--instdir" $InstArg
+  ${IfNot} ${Errors}
+    ${If} $InstArg != ""
+      StrCpy $INSTDIR $InstArg
+      !insertmacro Log "instdir from app: $INSTDIR"
+    ${EndIf}
+  ${EndIf}
+
+  ${IfNot} ${FileExists} "$INSTDIR\resources\app\package.json"
+    ReadRegStr $RegLoc HKCU "${REGKEY}" "InstallLocation"
+    ${If} $RegLoc != ""
+    ${AndIf} ${FileExists} "$RegLoc\resources\app\package.json"
+      StrCpy $INSTDIR $RegLoc
+      !insertmacro Log "instdir from registry: $INSTDIR"
+    ${EndIf}
+  ${EndIf}
+
+  ${IfNot} ${FileExists} "$INSTDIR\resources\app\package.json"
+    ${If} ${FileExists} "$LOCALAPPDATA\Programs\NexiaIDE\resources\app\package.json"
+      StrCpy $INSTDIR "$LOCALAPPDATA\Programs\NexiaIDE"
+      !insertmacro Log "instdir from default: $INSTDIR"
+    ${EndIf}
+  ${EndIf}
+
+  !insertmacro Log "target install dir: $INSTDIR"
+
   ; A delta can only patch an install built the way this one is. An older
   ; electron-builder install has resources\app.asar and no resources\app, and
   ; dropping dist next to a packed asar would do nothing at all: Electron loads
   ; the asar in preference, so the update would silently not apply.
   ${IfNot} ${FileExists} "$INSTDIR\resources\app\package.json"
-    !insertmacro Fail "Nexia IDE isn't installed here, or is too old for a quick update. Download the full installer instead."
+    !insertmacro Fail "Couldn't find the Nexia IDE install to update. Reinstall from the Nexia IDE releases page with the full installer."
   ${EndIf}
   ${If} ${FileExists} "$INSTDIR\resources\app.asar"
     !insertmacro Fail "This install needs the full installer, not a quick update."
