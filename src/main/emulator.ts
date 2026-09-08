@@ -40,6 +40,7 @@ export type EmulatorState = 'stopped' | 'starting' | 'running' | 'paused';
 export class EmulatorManager {
     private emulatorProcess: ChildProcess | null = null;
     private gdbProcess: ChildProcess | null = null;
+    private debuggerAttached = false;
     private state: EmulatorState = 'stopped';
     private emulatorPath: string = '';
     private gdbPath: string = '';
@@ -266,6 +267,8 @@ export class EmulatorManager {
             this.emit(`[GDB] Attached to PID ${pid}.\n`);
             // Resume the emulator so it keeps running
             await this.gdbCommand('-exec-continue');
+            this.debuggerAttached = true;
+            this.emitEvent({ event: 'debugger', attached: true });
             this.emit(`[Nexia 360] Debugger attached.\n\n`);
         } else {
             const errMsg = (attachResult.match(/msg="([^"]*)"/) || [])[1] || 'Unknown error';
@@ -614,6 +617,10 @@ export class EmulatorManager {
         this.breakpoints = [];
         this.stopListeners = [];
         this.pendingCallbacks.clear();
+        if (this.debuggerAttached) {
+            this.debuggerAttached = false;
+            this.emitEvent({ event: 'debugger', attached: false });
+        }
         this.setState('stopped');
     }
 }

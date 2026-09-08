@@ -11,6 +11,7 @@ let _escapeHtml: (s: string) => string;
 let _ipcRenderer: any;
 let _IPC: any;
 let _nodeOs: any;
+let _promptRun: (xex: string) => Promise<boolean | null>;
 
 export interface EmulatorDeps {
     $: (id: string) => HTMLElement;
@@ -19,6 +20,7 @@ export interface EmulatorDeps {
     ipcRenderer: any;
     IPC: any;
     nodeOs: any;
+    promptRun: (xex: string) => Promise<boolean | null>;
 }
 
 export function initEmulator(deps: EmulatorDeps) {
@@ -28,9 +30,13 @@ export function initEmulator(deps: EmulatorDeps) {
     _ipcRenderer = deps.ipcRenderer;
     _IPC = deps.IPC;
     _nodeOs = deps.nodeOs;
+    _promptRun = deps.promptRun;
 }
 
 let emuState: 'stopped' | 'starting' | 'running' | 'paused' = 'stopped';
+// Whether a debugger is actually attached — driven by the main process's
+// 'debugger' event, never assumed. The debug UI is shown only when this is true.
+let debuggerAttached = false;
 
 export function initEmulatorPanel() {
     const panel = _$('emulator-panel');
@@ -167,10 +173,13 @@ export function initEmulatorPanel() {
     _$('emu-launch-btn')?.addEventListener('click', async () => {
         const xex = (_$('emu-xex-path') as HTMLInputElement).value.trim();
         if (!xex) { _appendOutput('Select a XEX file to run.\n'); return; }
+        const mode = await _promptRun(xex);   // true = debugger, false = plain, null = cancel
+        if (mode === null) return;
         const btn = _$('emu-launch-btn') as HTMLButtonElement;
         btn.textContent = '⏳ Starting...';
         btn.disabled = true;
-        const result = await _ipcRenderer.invoke(_IPC.EMU_LAUNCH, xex);
+        _appendOutput(`[Nexia 360] Launching${mode ? ' with debugger' : ''}: ${xex}\n`);
+        const result = await _ipcRenderer.invoke(_IPC.EMU_LAUNCH, xex, mode);
         if (result.success) {
             // Directly update UI — don't wait for events
             emuState = 'running';
@@ -218,6 +227,7 @@ export function initEmulatorPanel() {
     _$('emu-stop-btn')?.addEventListener('click', async () => {
         await _ipcRenderer.invoke(_IPC.EMU_STOP);
         emuState = 'stopped';
+        debuggerAttached = false;
         updateEmulatorUI();
     });
 
@@ -257,6 +267,12 @@ function handleEmulatorEvent(event: any) {
     switch (event.event) {
         case 'state':
             emuState = event.state;
+            if (emuState === 'stopped') debuggerAttached = false;
+            updateEmulatorUI();
+            break;
+
+        case 'debugger':
+            debuggerAttached = !!event.attached;
             updateEmulatorUI();
             break;
 
@@ -294,6 +310,7 @@ function handleEmulatorEvent(event: any) {
 
         case 'stopped':
             emuState = 'stopped';
+            debuggerAttached = false;
             updateEmulatorUI();
             break;
 
@@ -338,22 +355,32 @@ function updateEmulatorUI() {
     if (!dot) return;
 
     const running = emuState === 'running' || emuState === 'paused';
+    const dbg = running && debuggerAttached;   // debug UI only when actually attached
 
     dot.className = 'emu-status-dot ' + emuState;
     const labels: Record<string, string> = {
         stopped: 'Stopped', starting: 'Starting...', running: 'Running', paused: '⏸ Paused'
     };
-    text.textContent = labels[emuState] || emuState;
+    text.textContent = (emuState === 'running' && !debuggerAttached)
+        ? 'Running (no debugger)'
+        : (labels[emuState] || emuState);
 
-    controls.classList.toggle('hidden', emuState === 'stopped');
+    // The control bar shows whenever running (for Stop). The debugging controls
+    // inside it — pause/resume/step — only when a debugger is actually attached.
+    controls.classList.toggle('hidden', !running);
     launchBtn.textContent = '▶ Launch in Emulator';
     launchBtn.disabled = running;
 
-    const show = running ? 'remove' : 'add';
-    bpSection?.classList[show]('hidden');
-    stackSection?.classList[show]('hidden');
-    regSection?.classList[show]('hidden');
-    memSection?.classList[show]('hidden');
+    // Debugger-only UI: hidden entirely unless a debugger is attached, so a plain
+    // run never shows breakpoints, registers, memory or stepping controls.
+    const showDbg = dbg ? 'remove' : 'add';
+    bpSection?.classList[showDbg]('hidden');
+    stackSection?.classList[showDbg]('hidden');
+    regSection?.classList[showDbg]('hidden');
+    memSection?.classList[showDbg]('hidden');
+    for (const id of ['emu-pause-btn', 'emu-resume-btn', 'emu-step-btn', 'emu-step-over-btn']) {
+        _$(id)?.classList.toggle('hidden', !dbg);
+    }
 
     // Pause/Resume button states
     const pauseBtn = _$('emu-pause-btn') as HTMLButtonElement;
