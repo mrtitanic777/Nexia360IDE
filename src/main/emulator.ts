@@ -108,7 +108,7 @@ export class EmulatorManager {
      * Launch Nexia360.exe separately, find its real PID, then attach GDB.
      * The emulator requires elevation so GDB can't launch it directly.
      */
-    async launch(xexPath: string): Promise<{ success: boolean; error?: string }> {
+    async launch(xexPath: string, attachDebugger: boolean = false): Promise<{ success: boolean; error?: string }> {
         if (!this.isConfigured()) {
             return { success: false, error: 'Set path to Nexia360.exe first.' };
         }
@@ -119,15 +119,23 @@ export class EmulatorManager {
             return { success: false, error: `XEX not found: ${xexPath}` };
         }
 
-        const gdb = this.findGdb();
-        if (!gdb) {
-            return { success: false, error: 'GDB not found. Install via MSYS2, MinGW, or TDM-GCC.' };
+        // The debugger is opt-in. Only look for GDB when the user asked to attach
+        // it, and if it isn't installed, run the game anyway rather than refusing:
+        // a missing debugger must never stop someone from running their build.
+        let gdb = '';
+        if (attachDebugger) {
+            gdb = this.findGdb();
+            if (!gdb) {
+                this.emit('[Nexia 360] GDB not found — running without the debugger. Install GDB (MSYS2, MinGW or TDM-GCC) to debug.\n');
+                attachDebugger = false;
+            }
         }
 
         this.setState('starting');
         this.emit(`\n[Nexia 360] Launching: ${path.basename(xexPath)}\n`);
         this.emit(`[Nexia 360] Emulator: ${this.emulatorPath}\n`);
-        this.emit(`[Nexia 360] GDB: ${gdb}\n\n`);
+        if (attachDebugger) this.emit(`[Nexia 360] GDB: ${gdb}\n`);
+        this.emit(`[Nexia 360] Debugger: ${attachDebugger ? 'attached' : 'off'}\n\n`);
 
         try {
             const emuName = path.basename(this.emulatorPath);
@@ -167,6 +175,11 @@ export class EmulatorManager {
 
             this.setState('running');
             this.emit(`[Nexia 360] Emulator is running.\n`);
+
+            // Without a debugger there's nothing left to do — the game is running.
+            if (!attachDebugger) {
+                return { success: true };
+            }
 
             // 2. Find the real PID (not the shell PID)
             const pidsAfter = this.findPidsByName(emuName);

@@ -5922,6 +5922,41 @@ $('editor-container').addEventListener('wheel', (e: WheelEvent) => {
 }, { passive: false });
 
 // ══════════════════════════════════════
+//  RUN IN EMULATOR
+// ══════════════════════════════════════
+// Ask whether to attach the debugger, then launch. The debugger is never forced —
+// running the game is the default; debugging (which needs GDB) is opt-in.
+function runInEmulator(xex: string) {
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:100000;display:flex;align-items:center;justify-content:center';
+    const modal = document.createElement('div');
+    modal.style.cssText = 'width:min(460px,92vw);background:var(--bg-panel);border:1px solid var(--border);border-radius:var(--radius-lg,8px);overflow:hidden;box-shadow:0 24px 70px rgba(0,0,0,0.6)';
+    modal.innerHTML = `
+        <div style="padding:20px 22px 0"><div style="font-size:16px;font-weight:600;color:var(--text)">Run in Nexia 360</div></div>
+        <div style="padding:12px 22px;color:var(--text-dim);font-size:13px;line-height:1.6">
+            Attach the debugger? Debugging lets you set breakpoints and step through your code, and needs GDB installed. Otherwise the game just runs.
+            <div style="margin-top:8px;font-size:11px;word-break:break-all">${escapeHtml(xex)}</div>
+        </div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;padding:14px 22px 18px;border-top:1px solid var(--border)">
+            <button id="run-cancel" class="welcome-btn">Cancel</button>
+            <button id="run-debug" class="welcome-btn">Run with Debugger</button>
+            <button id="run-plain" class="welcome-btn" style="background:var(--green);color:#06120d;border-color:var(--green);font-weight:600">Run</button>
+        </div>`;
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+    const close = () => overlay.remove();
+    const go = (withDbg: boolean) => {
+        close();
+        appendOutput(`[Nexia 360] Launching${withDbg ? ' with debugger' : ''}: ${xex}\n`);
+        ipcRenderer.invoke(IPC.EMU_LAUNCH, xex, withDbg);
+    };
+    overlay.addEventListener('click', (ev) => { if (ev.target === overlay) close(); });
+    modal.querySelector('#run-cancel')!.addEventListener('click', close);
+    modal.querySelector('#run-plain')!.addEventListener('click', () => go(false));
+    modal.querySelector('#run-debug')!.addEventListener('click', () => go(true));
+}
+
+// ══════════════════════════════════════
 //  KEYBOARD SHORTCUTS
 // ══════════════════════════════════════
 document.addEventListener('keydown', (e) => {
@@ -5930,8 +5965,7 @@ document.addEventListener('keydown', (e) => {
     if (e.key === 'F6') {
         e.preventDefault();
         if (lastBuiltXex) {
-            ipcRenderer.invoke(IPC.EMU_LAUNCH, lastBuiltXex);
-            appendOutput(`[Nexia 360] Launching: ${lastBuiltXex}\n`);
+            runInEmulator(lastBuiltXex);
         } else {
             appendOutput('No XEX built yet. Build first (F7), then run (F6).\n');
         }

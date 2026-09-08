@@ -637,8 +637,8 @@ function registerIpcHandlers() {
         };
     });
 
-    ipcMain.handle(IPC.EMU_LAUNCH, async (_e, xexPath: string) => {
-        return emulatorManager.launch(xexPath);
+    ipcMain.handle(IPC.EMU_LAUNCH, async (_e, xexPath: string, attachDebugger?: boolean) => {
+        return emulatorManager.launch(xexPath, !!attachDebugger);
     });
 
     ipcMain.handle(IPC.EMU_STOP, async () => {
