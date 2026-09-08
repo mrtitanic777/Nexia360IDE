@@ -1,5 +1,15 @@
 <h1 align="center">Nexia IDE</h1>
 
+## Project Status
+
+**🟢 Working — public.**
+
+- **Done:** Standalone Xbox 360 homebrew IDE (no Visual Studio required) — Monaco-based editor with Xbox 360 C++ syntax highlighting, XDK IntelliSense hints, tab management, and a Visual Studio–style Solution Explorer.
+- **Unfinished:** Some scaffolded areas; ongoing feature work toward full build/deploy integration.
+- **Next:** Deepen the build/deploy pipeline.
+
+_Last reviewed: 2026-07-15._
+
 <p align="center">
   <strong>A standalone development environment for Xbox 360 homebrew.</strong><br>
   No Visual Studio required — just install and start building.
