@@ -936,8 +936,20 @@ static int cmd_args(int argc, wchar_t **argv)
         return 2;
     }
 
-    nx_hints h;
-    h.custom = NULL; h.resources = NULL; h.exe_dir = NULL;
+    /* Build with the SDK the caller already resolved. The UI passes
+     * --custom = its detected SDK root (plus the location hints), so the build
+     * uses the exact same SDK as the rest of the app — bundled, user-data or
+     * system. Without this the build ran its own hint-less detection and could
+     * not see a bundled/user-data SDK, failing "not configured" while the status
+     * bar showed the SDK ready. Every field is initialised: nx_hints grew a
+     * user_data member, and leaving one unset is UB the moment detect() reads it. */
+    nx_hints h = { NULL, NULL, NULL, NULL };
+    for (int i = 0; i + 1 < argc; i++) {
+        if      (!wcscmp(argv[i], L"--custom"))     h.custom    = argv[i + 1];
+        else if (!wcscmp(argv[i], L"--exe-dir"))    h.exe_dir   = argv[i + 1];
+        else if (!wcscmp(argv[i], L"--resources"))  h.resources = argv[i + 1];
+        else if (!wcscmp(argv[i], L"--user-data"))  h.user_data = argv[i + 1];
+    }
     nx_sdk sdk;
     if (!nx_sdk_detect(&h, &sdk)) { nx_json_error("Xbox 360 SDK not configured"); return 2; }
 

@@ -628,7 +628,16 @@ export class BuildSystem {
             let out: string;
             const t0 = Date.now();
             try {
-                out = execFileSync(core, ['build', 'args', tmp, configuration],
+                // Hand the build the SDK the UI already resolved. Without this the
+                // build did its own hint-less SDK detection and could not see a
+                // bundled or user-data SDK — so it failed "not configured" even
+                // while the status bar showed the SDK as ready.
+                const bargs = ['build', 'args', tmp, configuration];
+                const sdkRoot = this.toolchain.getPaths()?.root;
+                if (sdkRoot) bargs.push('--custom', sdkRoot);
+                bargs.push('--exe-dir', path.dirname(process.execPath));
+                if (process.resourcesPath) bargs.push('--resources', process.resourcesPath);
+                out = execFileSync(core, bargs,
                     { encoding: 'utf8', windowsHide: true, maxBuffer: 32 * 1024 * 1024 });
             } catch (err: any) {
                 out = err?.stdout?.toString() || '';

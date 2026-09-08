@@ -99,7 +99,7 @@ int nx_cmd_tool(int argc, wchar_t **argv)
 {
     if (argc < 2 || wcscmp(argv[0], L"run")) { nx_json_error("tool: expected 'run <name> [args...]'"); return 2; }
 
-    nx_hints h = { NULL, NULL, NULL };
+    nx_hints h = { NULL, NULL, NULL, NULL };
     nx_sdk sdk;
     if (!nx_sdk_detect(&h, &sdk)) { nx_json_error("no Xbox 360 SDK found"); return 1; }
 
