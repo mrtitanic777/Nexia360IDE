@@ -2609,11 +2609,30 @@ $('setup-extract-btn').addEventListener('click', async () => {
     const btn = $('setup-extract-btn') as HTMLButtonElement;
     const status = $('setup-extract-status');
     btn.disabled = true;
-    status.textContent = 'Choose your Xbox 360 SDK installer (.exe)…';
     status.style.color = 'var(--text-dim)';
+    status.textContent = 'Choose your Xbox 360 SDK installer (.exe)…';
+
+    // A live, self-animating "Extracting…" indicator. Extraction runs for several
+    // minutes and per-file progress can arrive in bursts, so this keeps moving on
+    // its own — the user is never left staring at a frozen screen wondering if it
+    // stalled (which is exactly what happened before this existed).
+    let latest = '';
+    let dots = 0;
+    let timer: any = null;
+    const renderExtracting = () => {
+        dots = (dots + 1) % 4;
+        status.style.color = 'var(--text)';
+        status.innerHTML = `⏳ Extracting the Xbox 360 SDK${'.'.repeat(dots)}`
+            + `<span style="color:var(--text-dim)"> — this can take a few minutes, please wait.</span>`
+            + (latest ? `<div style="color:var(--text-dim);margin-top:4px;font-size:11px;">${latest}</div>` : '');
+    };
+    const startAnim = () => { if (!timer) { renderExtracting(); timer = setInterval(renderExtracting, 450); } };
+    const stopAnim = () => { if (timer) { clearInterval(timer); timer = null; } };
+
     const onProg = (_e: any, p: any) => {
-        const line = String(p.line || '').split('\n').map(s => s.trim()).filter(Boolean).pop();
-        if (line) status.textContent = line;
+        if (p.started) { startAnim(); return; }
+        const line = String(p.line || '').split('\n').map((s: string) => s.trim()).filter(Boolean).pop();
+        if (line) { latest = line; startAnim(); }
     };
     ipcRenderer.on('sdk:extractProgress', onProg);
     let res: any;
@@ -2621,6 +2640,7 @@ $('setup-extract-btn').addEventListener('click', async () => {
         res = await ipcRenderer.invoke(IPC.SDK_EXTRACT);
     } finally {
         ipcRenderer.removeListener('sdk:extractProgress', onProg);
+        stopAnim();
     }
     if (res && res.success && res.paths) {
         ($('setup-sdk-path') as HTMLInputElement).value = res.paths.root;

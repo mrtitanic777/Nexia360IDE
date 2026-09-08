@@ -407,6 +407,13 @@ static int ExtractSdk(const WCHAR *installerPath, const WCHAR *destDir)
 
 int wmain(int argc, WCHAR **argv)
 {
+    /* Unbuffered stdout. This runs behind a pipe — the IDE and NSIS read its
+     * output live — and C stdio block-buffers a pipe by default, so every
+     * progress line would otherwise arrive in one burst when the process exits.
+     * That made a multi-minute extraction look frozen until it suddenly finished.
+     * Unbuffered means each line reaches the reader the instant it is printed. */
+    setvbuf(stdout, NULL, _IONBF, 0);
+
     if (argc >= 2 && _wcsicmp(argv[1], L"--find") == 0) {
         WCHAR found[SDK_MAX_PATH];
         if (FindSdkInstaller(found, SDK_MAX_PATH)) {

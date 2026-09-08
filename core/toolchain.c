@@ -96,6 +96,15 @@ static int candidates(const nx_hints *h, cand *list, int cap)
         push_join(list, &n, cap, up, L"SDK", 1);
     }
 
+    /* Electron's userData dir: where the SDK is extracted when the install dir
+     * is not writable (e.g. an install under Program Files). Same XDK\ layout. */
+    if (h->user_data && *h->user_data) {
+        wchar_t sdk[NX_PATH];
+        nx_join(sdk, NX_PATH, h->user_data, L"SDK");
+        push_join(list, &n, cap, sdk, L"XDK", 1);
+        push_join(list, &n, cap, h->user_data, L"SDK", 1);
+    }
+
     push(list, &n, cap, L"C:\\Program Files\\NexiaIDE\\SDK\\XDK", 1);
     push(list, &n, cap, L"C:\\Program Files\\NexiaIDE\\SDK", 1);
     push(list, &n, cap, L"C:\\Program Files (x86)\\NexiaIDE\\SDK\\XDK", 1);

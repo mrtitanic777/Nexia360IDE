@@ -56,6 +56,9 @@ typedef struct {
     const wchar_t *custom;      /* an explicit path, highest priority. may be NULL */
     const wchar_t *resources;   /* Electron's resourcesPath. may be NULL */
     const wchar_t *exe_dir;     /* directory of the host executable. may be NULL */
+    const wchar_t *user_data;   /* Electron's userData dir — where the SDK is
+                                 * extracted when the install dir isn't writable.
+                                 * may be NULL. */
 } nx_hints;
 
 /* ── toolchain.c ── */

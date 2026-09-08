@@ -32,6 +32,7 @@ static void hints_from(int argc, wchar_t **argv, nx_hints *h)
     h->custom    = opt(argc, argv, L"--custom");
     h->resources = opt(argc, argv, L"--resources");
     h->exe_dir   = opt(argc, argv, L"--exe-dir");
+    h->user_data = opt(argc, argv, L"--user-data");
 }
 
 static void print_sdk(const nx_sdk *s)

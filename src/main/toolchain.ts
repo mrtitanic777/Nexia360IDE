@@ -23,6 +23,17 @@ function corePath(): string {
 export class Toolchain {
     private sdkPaths: SdkPaths | null = null;
     private bundledSdk: boolean = false;
+    private userDataDir?: string;
+
+    /**
+     * userDataDir is Electron's app.getPath('userData'). It's passed as a hint so
+     * nexia-core will find an SDK extracted there (the fallback when the install
+     * directory isn't writable). Optional: constructed without it — as in the
+     * parity test — nexia-core is given no --user-data and behaves exactly as before.
+     */
+    constructor(userDataDir?: string) {
+        this.userDataDir = userDataDir;
+    }
 
     /**
      * Detect the Xbox 360 SDK.
@@ -44,6 +55,7 @@ export class Toolchain {
         if (customPath) args.push('--custom', customPath);
         if (process.resourcesPath) args.push('--resources', process.resourcesPath);
         args.push('--exe-dir', path.dirname(process.execPath));
+        if (this.userDataDir) args.push('--user-data', this.userDataDir);
 
         let out: string;
         try {

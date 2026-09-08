@@ -127,7 +127,7 @@ function createWindow() {
 // ── Initialize Services ──
 
 async function initializeServices() {
-    toolchain = new Toolchain();
+    toolchain = new Toolchain(app.getPath('userData'));
     buildSystem = new BuildSystem(toolchain);
     devkitManager = new DevkitManager(toolchain);
 
@@ -260,14 +260,31 @@ function registerIpcHandlers() {
                 return { success: false, error: `extract_sdk.exe not found at ${extractor}` };
             }
 
-            // The install root: extract_sdk writes <destDir>\SDK\XDK, and detect()
-            // is given --exe-dir = this same directory, so it finds it as bundled.
-            const destDir = app.isPackaged
+            // Where to extract. First choice is the install root: extract_sdk writes
+            // <destDir>\SDK\XDK and detect() is given --exe-dir = that dir, so it's
+            // found as bundled. If the install dir isn't writable (e.g. installed
+            // under Program Files without elevation), fall back to userData, which
+            // detect() also searches (via --user-data). Test writability for real —
+            // fs.accessSync(W_OK) is unreliable on Windows — by writing a temp file.
+            const installRoot = app.isPackaged
                 ? path.dirname(process.execPath)
                 : path.join(__dirname, '..', '..');
+            let destDir = installRoot;
+            try {
+                const probe = path.join(installRoot, `.nexia-write-test-${Date.now()}`);
+                fs.writeFileSync(probe, 'x');
+                fs.unlinkSync(probe);
+            } catch {
+                destDir = app.getPath('userData');
+            }
 
             const { spawn } = require('child_process');
             return await new Promise((resolve) => {
+                // Immediate feedback: extraction runs for minutes, and the first
+                // real progress line may lag, so say we've started right away.
+                if (!e.sender.isDestroyed()) {
+                    e.sender.send('sdk:extractProgress', { line: 'Extracting the Xbox 360 SDK…', started: true });
+                }
                 const child = spawn(extractor, [exe as string, destDir], { windowsHide: true });
                 let errBuf = '';
                 child.stdout.on('data', (d: Buffer) => {
