@@ -368,6 +368,52 @@ function defineEditorTheme() {
 }
 const SETTINGS_FILE = nodePath.join(nodeOs.homedir(), '.nexia-ide-prefs.json');
 
+// API keys are secrets: kept OUT of the plaintext prefs file and OUT of cloud
+// sync, and stored encrypted via the OS keystore (main-process safeStorage).
+const SECRET_FIELDS = ['aiApiKey', 'youtubeApiKey', 'searchApiKey'];
+let _secretsReady = false;
+// Only redact secrets from the plaintext prefs once we've confirmed they're
+// safely in the encrypted store — so a machine where OS encryption is somehow
+// unavailable keeps its keys in prefs rather than silently losing them.
+let _secretsEncrypted = false;
+
+// Write the prefs file. Secret fields are blanked only when they're encrypted
+// elsewhere; otherwise they stay (no encryption available → don't lose the key).
+function writePrefsFile() {
+    try {
+        const onDisk: any = { ...userSettings };
+        if (_secretsEncrypted) for (const f of SECRET_FIELDS) onDisk[f] = '';
+        nodeFs.writeFileSync(SETTINGS_FILE, JSON.stringify(onDisk, null, 2));
+    } catch {}
+}
+
+// Push the current secret values to the encrypted store (main process, DPAPI).
+async function persistSecrets() {
+    const secrets: Record<string, string> = {};
+    for (const f of SECRET_FIELDS) secrets[f] = (userSettings as any)[f] || '';
+    try {
+        const r = await ipcRenderer.invoke('secret:save', secrets);
+        _secretsEncrypted = !!(r && r.ok);
+    } catch { _secretsEncrypted = false; }
+}
+
+// At startup: migrate any plaintext keys left by an older prefs file into the
+// encrypted store (then redact them from prefs), or load them back if already
+// migrated. Afterwards, secret changes persist encrypted on every save.
+async function initSecrets() {
+    try {
+        const hasPlain = SECRET_FIELDS.some(f => (userSettings as any)[f]);
+        if (hasPlain) {
+            await persistSecrets();
+            writePrefsFile();   // redacts only if encryption succeeded
+        } else {
+            const secrets = await ipcRenderer.invoke('secret:load');
+            for (const f of SECRET_FIELDS) if (secrets && secrets[f]) (userSettings as any)[f] = secrets[f];
+        }
+    } catch {}
+    _secretsReady = true;
+}
+
 function loadUserSettings() {
     try {
         if (nodeFs.existsSync(SETTINGS_FILE)) {
@@ -406,7 +452,10 @@ function loadUserSettings() {
 }
 
 function saveUserSettings() {
-    try { nodeFs.writeFileSync(SETTINGS_FILE, JSON.stringify(userSettings, null, 2)); } catch {}
+    // Encrypt secrets first, then write prefs (so redaction only happens once the
+    // key is safely stored). Before secrets are loaded, just write prefs as-is.
+    if (_secretsReady) persistSecrets().then(() => writePrefsFile());
+    else writePrefsFile();
     // Also push to cloud if logged in (debounced)
     scheduleCloudSync();
 }
@@ -424,6 +473,8 @@ function scheduleCloudSync() {
         if (_pullInFlight) { scheduleCloudSync(); return; }
         try {
             const cloudData: any = { ...userSettings };
+            // Never upload API keys to the cloud — they stay on this machine only.
+            for (const f of SECRET_FIELDS) delete cloudData[f];
             // Also include Discord auth if present
             const _dau = getDiscordAuthUser();
             if (_dau) {
@@ -461,7 +512,7 @@ async function pullCloudSettings() {
         const prefKeys = [
             'fontSize', 'accentColor', 'bgDark', 'bgMain', 'bgPanel', 'bgSidebar',
             'editorBg', 'textColor', 'textDim', 'fancyEffects', 'layout', 'cornerRadius',
-            'colorMode', 'aiProvider', 'aiApiKey', 'aiEndpoint', 'aiModel',
+            'colorMode', 'aiProvider', 'aiEndpoint', 'aiModel',
             'aiSystemPrompt', 'aiAutoErrors', 'aiInlineSuggest', 'aiFileContext',
             'skin', 'syntaxColors',
         ];
@@ -480,8 +531,8 @@ async function pullCloudSettings() {
             }
             (userSettings as any)[key] = cloud[key];
         }
-        // Save merged settings locally
-        try { nodeFs.writeFileSync(SETTINGS_FILE, JSON.stringify(userSettings, null, 2)); } catch {}
+        // Save merged settings locally (secrets stay redacted; encrypted separately)
+        writePrefsFile();
 
         // Restore Discord auth from cloud
         if (cloud.discord && cloud.discord.accessToken) {
@@ -6260,6 +6311,7 @@ async function init() {
     observer.observe(document.body, { childList: true, subtree: true });
 
     loadUserSettings();
+    await initSecrets();   // decrypt API keys (or migrate old plaintext keys) before use
     loadProfile();
 
     // Wire shared app context for extracted modules

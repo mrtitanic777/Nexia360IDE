@@ -3,7 +3,7 @@
  * Electron main process handling window creation, IPC, and backend services.
  */
 
-import { app, BrowserWindow, ipcMain, dialog, shell, Menu, MenuItem } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, shell, Menu, MenuItem, safeStorage } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
 import { Toolchain } from './toolchain';
@@ -222,6 +222,26 @@ function registerIpcHandlers() {
             state: toolchain.detectInstallState(),
             partialPath: toolchain.getPartialInstallPath(),
         };
+    });
+
+    // ── Secrets (API keys) ──
+    // Encrypted at rest with the OS keystore (DPAPI on Windows) via Electron's
+    // safeStorage, in a file separate from the plaintext prefs. The renderer
+    // keeps API keys out of ~/.nexia-ide-prefs.json and out of cloud sync.
+    const SECRETS_PATH = path.join(app.getPath('userData'), 'secrets.bin');
+    ipcMain.handle('secret:save', async (_e, secrets: Record<string, string>) => {
+        try {
+            if (!safeStorage.isEncryptionAvailable()) return { ok: false, reason: 'unavailable' };
+            const enc = safeStorage.encryptString(JSON.stringify(secrets || {}));
+            fs.writeFileSync(SECRETS_PATH, enc);
+            return { ok: true };
+        } catch (e: any) { return { ok: false, reason: e.message }; }
+    });
+    ipcMain.handle('secret:load', async () => {
+        try {
+            if (!fs.existsSync(SECRETS_PATH) || !safeStorage.isEncryptionAvailable()) return {};
+            return JSON.parse(safeStorage.decryptString(fs.readFileSync(SECRETS_PATH)));
+        } catch { return {}; }
     });
 
     ipcMain.handle(IPC.SDK_PREP_REGISTRY, async () => {
